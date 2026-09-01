@@ -8,12 +8,23 @@ import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Loader2, TestTube2, Search, Eye, EyeOff, X } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import {
+  AlertTriangle,
+  Loader2,
+  TestTube2,
+  Search,
+  Eye,
+  EyeOff,
+  X,
+} from "lucide-react";
 import {
   useGlobalProxyUrl,
   useSetGlobalProxyUrl,
   useTestProxy,
   useScanProxies,
+  useCodexProxyStatus,
+  useSetCodexProxyEnabled,
   type DetectedProxy,
 } from "@/hooks/useGlobalProxy";
 
@@ -88,6 +99,8 @@ export function GlobalProxySettings() {
     () => mergeAuth(url, username, password),
     [url, username, password],
   );
+  const codexProxyStatus = useCodexProxyStatus();
+  const codexProxyMutation = useSetCodexProxyEnabled(fullUrl);
 
   // 同步远程配置
   useEffect(() => {
@@ -101,7 +114,14 @@ export function GlobalProxySettings() {
   }, [savedUrl]);
 
   const handleSave = async () => {
+    if (codexProxyStatus.data?.enabled && fullUrl) {
+      const result = await testMutation.mutateAsync(fullUrl);
+      if (!result.success) return;
+    }
     await setMutation.mutateAsync(fullUrl);
+    if (codexProxyStatus.data?.enabled) {
+      await codexProxyMutation.mutateAsync(Boolean(fullUrl));
+    }
     setDirty(false);
   };
 
@@ -114,6 +134,14 @@ export function GlobalProxySettings() {
   const handleScan = async () => {
     const result = await scanMutation.mutateAsync();
     setDetected(result);
+  };
+
+  const handleCodexProxyToggle = async (enabled: boolean) => {
+    if (enabled) {
+      const result = await testMutation.mutateAsync(fullUrl);
+      if (!result.success) return;
+    }
+    await codexProxyMutation.mutateAsync(enabled);
   };
 
   const handleSelect = (proxyUrl: string) => {
@@ -270,6 +298,69 @@ export function GlobalProxySettings() {
           ))}
         </div>
       )}
+
+      <div className="rounded-lg border border-border-default bg-muted/30 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            <label htmlFor="codex-proxy-sync" className="text-sm font-medium">
+              {t("settings.globalProxy.codex.enable")}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.globalProxy.codex.description")}
+            </p>
+            {codexProxyStatus.data?.path && (
+              <p className="break-all font-mono text-[11px] text-muted-foreground">
+                {codexProxyStatus.data.path}
+              </p>
+            )}
+          </div>
+          <Switch
+            id="codex-proxy-sync"
+            aria-label={t("settings.globalProxy.codex.enable")}
+            checked={codexProxyStatus.data?.enabled ?? false}
+            disabled={
+              codexProxyStatus.isLoading ||
+              codexProxyMutation.isPending ||
+              (!codexProxyStatus.data?.enabled && !fullUrl) ||
+              (!codexProxyStatus.data?.enabled && dirty)
+            }
+            onCheckedChange={(enabled) =>
+              void handleCodexProxyToggle(enabled).catch(() => undefined)
+            }
+          />
+        </div>
+        {codexProxyStatus.data?.enabled && (
+          <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+            {t("settings.globalProxy.codex.restartHint")}
+          </p>
+        )}
+        {codexProxyStatus.data?.enabled &&
+          codexProxyStatus.data.portReachable === false && (
+            <div className="mt-3 flex items-start gap-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t("settings.globalProxy.codex.portUnavailable")}</span>
+            </div>
+          )}
+        {codexProxyStatus.data?.envTxtDetected && (
+          <div className="mt-3 flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{t("settings.globalProxy.codex.envTxtDetected")}</span>
+          </div>
+        )}
+        {codexProxyStatus.error && (
+          <div className="mt-3 flex items-start gap-2 text-xs text-destructive">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              {t("settings.globalProxy.codex.statusFailed", {
+                error:
+                  codexProxyStatus.error instanceof Error
+                    ? codexProxyStatus.error.message
+                    : String(codexProxyStatus.error),
+              })}
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

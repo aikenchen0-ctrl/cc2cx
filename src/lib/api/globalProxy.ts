@@ -32,6 +32,15 @@ export interface DetectedProxy {
   port: number;
 }
 
+export interface CodexProxyEnvStatus {
+  enabled: boolean;
+  path: string;
+  proxyUrl: string | null;
+  backupPath: string | null;
+  portReachable: boolean | null;
+  envTxtDetected: boolean;
+}
+
 /**
  * 获取全局代理 URL
  *
@@ -82,4 +91,14 @@ export async function getUpstreamProxyStatus(): Promise<UpstreamProxyStatus> {
  */
 export async function scanLocalProxies(): Promise<DetectedProxy[]> {
   return invoke<DetectedProxy[]>("scan_local_proxies");
+}
+
+export async function getCodexProxyEnvStatus(): Promise<CodexProxyEnvStatus> {
+  return invoke<CodexProxyEnvStatus>("get_codex_proxy_env_status");
+}
+
+export async function setCodexProxyEnv(
+  proxyUrl: string,
+): Promise<CodexProxyEnvStatus> {
+  return invoke<CodexProxyEnvStatus>("set_codex_proxy_env", { proxyUrl });
 }

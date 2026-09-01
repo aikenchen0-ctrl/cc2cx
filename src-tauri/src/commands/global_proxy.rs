@@ -5,7 +5,9 @@
 use crate::proxy::http_client;
 use crate::store::AppState;
 use serde::Serialize;
+use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// 获取全局代理 URL
@@ -106,6 +108,8 @@ pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
     // 使用多个测试目标，提高兼容性
     // 优先使用 httpbin（专门用于 HTTP 测试），回退到其他公共端点
     let test_urls = [
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://api.openai.com/v1/models",
         "https://httpbin.org/get",
         "https://www.google.com",
         "https://api.anthropic.com",
@@ -244,4 +248,315 @@ pub async fn scan_local_proxies() -> Vec<DetectedProxy> {
     })
     .await
     .unwrap_or_default()
+}
+
+const CODEX_PROXY_BEGIN: &str = "# BEGIN CC2CX CODEX PROXY";
+const CODEX_PROXY_END: &str = "# END CC2CX CODEX PROXY";
+
+fn codex_proxy_env_lines(proxy_url: &str) -> Result<String, String> {
+    if proxy_url
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n' | '"'))
+    {
+        return Err("代理地址包含不能写入 .env 的字符".to_string());
+    }
+    let proxy_url = proxy_url.trim();
+    let parsed = url::Url::parse(proxy_url).map_err(|error| format!("代理地址无效: {error}"))?;
+    if parsed.host_str().is_none() || parsed.port().is_none() {
+        return Err("代理地址必须包含主机和端口".to_string());
+    }
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let masked_url = http_client::mask_url(proxy_url);
+    match scheme.as_str() {
+        "http" | "https" => Ok(format!(
+            "HTTP_PROXY=\"{proxy_url}\"\nHTTPS_PROXY=\"{proxy_url}\"\nNO_PROXY=\"localhost,127.0.0.1,::1\""
+        )),
+        "socks5" | "socks5h" => Ok(format!(
+            "ALL_PROXY=\"{proxy_url}\"\nNO_PROXY=\"localhost,127.0.0.1,::1\""
+        )),
+        _ => Err(format!("不支持的 Codex 代理协议: {masked_url}")),
+    }
+}
+
+fn remove_codex_proxy_env(existing: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(existing.len());
+    let mut in_managed_block = false;
+    let mut found_begin = false;
+    let mut found_end = false;
+    for line in existing.split_inclusive('\n') {
+        if line.trim() == CODEX_PROXY_BEGIN {
+            if in_managed_block || found_begin {
+                return Err("Codex .env 包含重复的 CC2CX 代理块".to_string());
+            }
+            in_managed_block = true;
+            found_begin = true;
+            continue;
+        }
+        if line.trim() == CODEX_PROXY_END {
+            if !in_managed_block {
+                return Err("Codex .env 的 CC2CX 代理结束标记不匹配".to_string());
+            }
+            in_managed_block = false;
+            found_end = true;
+            continue;
+        }
+        if !in_managed_block {
+            output.push_str(line);
+        }
+    }
+    if in_managed_block || (found_begin != found_end) {
+        return Err("Codex .env 的 CC2CX 代理块不完整".to_string());
+    }
+    Ok(output)
+}
+
+fn upsert_codex_proxy_env(existing: &str, proxy_url: &str) -> Result<String, String> {
+    let lines = codex_proxy_env_lines(proxy_url)?;
+    let cleaned = remove_codex_proxy_env(existing)?;
+    let newline = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut output = cleaned;
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push_str(newline);
+    }
+    output.push_str(CODEX_PROXY_BEGIN);
+    output.push_str(newline);
+    output.push_str(&lines.replace('\n', newline));
+    output.push_str(newline);
+    output.push_str(CODEX_PROXY_END);
+    output.push_str(newline);
+    Ok(output)
+}
+
+fn codex_env_path() -> PathBuf {
+    crate::codex_config::get_codex_config_dir().join(".env")
+}
+
+fn codex_env_backup_path(path: &Path) -> PathBuf {
+    path.with_file_name(".env.cc2cx.bak")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProxyEnvStatus {
+    pub enabled: bool,
+    pub path: String,
+    pub proxy_url: Option<String>,
+    pub backup_path: Option<String>,
+    pub port_reachable: Option<bool>,
+    pub env_txt_detected: bool,
+}
+
+fn read_codex_env(path: &Path) -> Result<String, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("Codex .env 是符号链接，CC2CX 不会自动修改".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(format!("读取 Codex .env 元数据失败: {error}")),
+    }
+    fs::read_to_string(path).map_err(|error| format!("Codex .env 不是有效的 UTF-8 文本: {error}"))
+}
+
+fn codex_managed_proxy_url(content: &str) -> Option<String> {
+    let mut in_managed_block = false;
+    for line in content.lines() {
+        if line.trim() == CODEX_PROXY_BEGIN {
+            in_managed_block = true;
+            continue;
+        }
+        if line.trim() == CODEX_PROXY_END {
+            break;
+        }
+        if !in_managed_block {
+            continue;
+        }
+        if let Some(value) = line
+            .strip_prefix("HTTP_PROXY=\"")
+            .or_else(|| line.strip_prefix("ALL_PROXY=\""))
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn proxy_port_reachable(proxy_url: &str) -> Option<bool> {
+    let parsed = url::Url::parse(proxy_url).ok()?;
+    let host = parsed.host_str()?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    let port = parsed.port_or_known_default()?;
+    let address = format!("{host}:{port}");
+    let addresses = std::net::ToSocketAddrs::to_socket_addrs(&address).ok()?;
+    Some(
+        addresses.into_iter().any(|address| {
+            TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
+        }),
+    )
+}
+
+fn read_codex_proxy_env_status() -> Result<CodexProxyEnvStatus, String> {
+    let path = codex_env_path();
+    read_codex_proxy_env_status_at(&path)
+}
+
+fn read_codex_proxy_env_status_at(path: &Path) -> Result<CodexProxyEnvStatus, String> {
+    let content = read_codex_env(&path)?;
+    remove_codex_proxy_env(&content)?;
+    let enabled = content.contains(CODEX_PROXY_BEGIN) && content.contains(CODEX_PROXY_END);
+    let raw_proxy_url = enabled.then(|| codex_managed_proxy_url(&content)).flatten();
+    if enabled && raw_proxy_url.is_none() {
+        return Err("Codex .env 的 CC2CX 代理块缺少代理地址".to_string());
+    }
+    let port_reachable = raw_proxy_url.as_deref().and_then(proxy_port_reachable);
+    let proxy_url = raw_proxy_url.as_deref().map(http_client::mask_url);
+    Ok(CodexProxyEnvStatus {
+        enabled,
+        path: path.to_string_lossy().into_owned(),
+        proxy_url,
+        backup_path: enabled.then(|| codex_env_backup_path(&path).to_string_lossy().into_owned()),
+        port_reachable,
+        env_txt_detected: path.with_file_name(".env.txt").is_file(),
+    })
+}
+
+fn write_codex_proxy_env(proxy_url: Option<&str>) -> Result<CodexProxyEnvStatus, String> {
+    let path = codex_env_path();
+    write_codex_proxy_env_at(&path, proxy_url)
+}
+
+fn write_codex_proxy_env_at(
+    path: &Path,
+    proxy_url: Option<&str>,
+) -> Result<CodexProxyEnvStatus, String> {
+    let existing = read_codex_env(&path)?;
+    let updated = match proxy_url.filter(|url| !url.trim().is_empty()) {
+        Some(proxy_url) => upsert_codex_proxy_env(&existing, proxy_url)?,
+        None => remove_codex_proxy_env(&existing)?,
+    };
+    if updated == existing {
+        return read_codex_proxy_env_status_at(path);
+    }
+    if path.exists() {
+        let backup = codex_env_backup_path(&path);
+        crate::config::atomic_write_private(&backup, existing.as_bytes())
+            .map_err(|error| format!("备份 Codex .env 失败: {error}"))?;
+    }
+    crate::config::atomic_write_private(&path, updated.as_bytes())
+        .map_err(|error| format!("写入 Codex .env 失败: {error}"))?;
+    read_codex_proxy_env_status_at(path)
+}
+
+#[tauri::command]
+pub fn get_codex_proxy_env_status() -> Result<CodexProxyEnvStatus, String> {
+    read_codex_proxy_env_status()
+}
+
+#[tauri::command]
+pub fn set_codex_proxy_env(proxy_url: String) -> Result<CodexProxyEnvStatus, String> {
+    let proxy_url = proxy_url.trim();
+    let proxy_url = (!proxy_url.is_empty()).then_some(proxy_url);
+    if let Some(proxy_url) = proxy_url {
+        codex_proxy_env_lines(proxy_url)?;
+    }
+    let status = write_codex_proxy_env(proxy_url)?;
+    log::info!(
+        "[GlobalProxy] Codex .env proxy {}: {}",
+        if status.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        http_client::mask_url(status.proxy_url.as_deref().unwrap_or("direct"))
+    );
+    Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_proxy_env_rejects_unsupported_schemes() {
+        assert!(codex_proxy_env_lines("http://127.0.0.1:7890").is_ok());
+        assert!(codex_proxy_env_lines("socks5h://127.0.0.1:1080").is_ok());
+        assert!(codex_proxy_env_lines("ftp://127.0.0.1:21").is_err());
+        assert!(codex_proxy_env_lines("http://127.0.0.1").is_err());
+        assert!(codex_proxy_env_lines("http://127.0.0.1:7890\nINJECTED=value").is_err());
+    }
+
+    #[test]
+    fn codex_proxy_env_upsert_preserves_user_values_and_replaces_managed_block() {
+        let existing = "CUSTOM=value\n\n# BEGIN CC2CX CODEX PROXY\nHTTP_PROXY=\"http://old:1\"\n# END CC2CX CODEX PROXY\n";
+        let updated = upsert_codex_proxy_env(existing, "http://127.0.0.1:7890")
+            .expect("proxy block should be generated");
+
+        assert!(updated.contains("CUSTOM=value"));
+        assert!(updated.contains("HTTP_PROXY=\"http://127.0.0.1:7890\""));
+        assert!(!updated.contains("http://old:1"));
+        assert_eq!(updated.matches("BEGIN CC2CX CODEX PROXY").count(), 1);
+    }
+
+    #[test]
+    fn codex_proxy_env_remove_keeps_unmanaged_content() {
+        let existing = "CUSTOM=value\n# BEGIN CC2CX CODEX PROXY\nALL_PROXY=\"socks5://127.0.0.1:1080\"\n# END CC2CX CODEX PROXY\n";
+        let cleaned = remove_codex_proxy_env(existing).expect("managed block should be removed");
+
+        assert_eq!(cleaned.trim(), "CUSTOM=value");
+        assert!(!cleaned.contains("CC2CX CODEX PROXY"));
+    }
+
+    #[test]
+    fn codex_proxy_status_reads_only_the_managed_block() {
+        let content = "HTTP_PROXY=\"http://user-owned:9000\"\n# BEGIN CC2CX CODEX PROXY\nHTTP_PROXY=\"http://127.0.0.1:7890\"\n# END CC2CX CODEX PROXY\n";
+        assert_eq!(
+            codex_managed_proxy_url(content).as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+    }
+
+    #[test]
+    fn codex_proxy_env_preserves_crlf_outside_the_managed_block() {
+        let existing = "CUSTOM=one\r\nOTHER=two\r\n";
+        let updated = upsert_codex_proxy_env(existing, "http://127.0.0.1:7890")
+            .expect("enable proxy with CRLF");
+        assert!(updated.starts_with("CUSTOM=one\r\nOTHER=two\r\n"));
+        assert!(!updated.replace("\r\n", "").contains('\n'));
+        let cleaned = remove_codex_proxy_env(&updated).expect("remove managed block");
+        assert_eq!(cleaned, existing);
+    }
+
+    #[test]
+    fn codex_proxy_file_roundtrip_backs_up_and_preserves_user_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let codex_dir = directory.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create Codex directory");
+        let path = codex_dir.join(".env");
+        fs::write(&path, "CUSTOM=value\n").expect("write existing env");
+
+        let enabled =
+            write_codex_proxy_env_at(&path, Some("http://127.0.0.1:7890")).expect("enable proxy");
+        assert!(enabled.enabled);
+        assert_eq!(
+            fs::read_to_string(codex_env_backup_path(&path)).expect("read backup"),
+            "CUSTOM=value\n"
+        );
+        let enabled_content = fs::read_to_string(&path).expect("read enabled env");
+        assert!(enabled_content.contains("CUSTOM=value"));
+        assert!(enabled_content.contains(CODEX_PROXY_BEGIN));
+
+        let disabled = write_codex_proxy_env_at(&path, None).expect("disable proxy");
+        assert!(!disabled.enabled);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read cleaned env").trim(),
+            "CUSTOM=value"
+        );
+    }
 }

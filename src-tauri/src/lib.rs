@@ -1658,6 +1658,8 @@ pub fn run() {
             commands::test_proxy_url,
             commands::get_upstream_proxy_status,
             commands::scan_local_proxies,
+            commands::get_codex_proxy_env_status,
+            commands::set_codex_proxy_env,
             // Window theme control
             commands::set_window_theme,
             // Generic managed auth commands

@@ -883,6 +883,17 @@
       "saveFailed": "儲存失敗：{{error}}",
       "testSuccess": "連線成功！延遲 {{latency}}ms",
       "testFailed": "連線失敗：{{error}}",
+      "codex": {
+        "enable": "將此代理同步到 Codex",
+        "description": "安全更新 Codex 設定目錄中的 .env，優先修復 CLI、app-server、HTTPS 與 WebSocket。不會修改系統環境變數，也不會覆蓋其他 .env 內容。",
+        "enabled": "Codex 代理已啟用",
+        "disabled": "Codex 代理已關閉",
+        "failed": "更新 Codex 代理失敗：{{error}}",
+        "statusFailed": "讀取 Codex 代理狀態失敗：{{error}}",
+        "restartHint": "請完全結束並重新啟動 Codex。桌面介面是否生效取決於目前 Codex App 版本與平台。",
+        "portUnavailable": "設定的本機代理連接埠目前沒有監聽。請啟動代理軟體或關閉此選項，避免 Codex 持續重新連線。",
+        "envTxtDetected": "偵測到 .env.txt。Windows 可能隱藏了副檔名；Codex 只會讀取名稱為 .env 的檔案。"
+      },
       "pricingDefaultsTitle": "計費預設設定",
       "pricingDefaultsDescription": "設定各應用程式的預設倍率與計費模式來源。",
       "pricingAppLabel": "應用程式",

@@ -882,6 +882,17 @@
       "saveFailed": "Save failed: {{error}}",
       "testSuccess": "Connected! Latency {{latency}}ms",
       "testFailed": "Connection failed: {{error}}",
+      "codex": {
+        "enable": "Sync this proxy to Codex",
+        "description": "Safely updates the .env file in the Codex configuration directory, prioritizing CLI, app-server, HTTPS, and WebSocket traffic. It does not change system environment variables or overwrite other .env content.",
+        "enabled": "Codex proxy enabled",
+        "disabled": "Codex proxy disabled",
+        "failed": "Failed to update Codex proxy: {{error}}",
+        "statusFailed": "Failed to read Codex proxy status: {{error}}",
+        "restartHint": "Fully quit and restart Codex. Desktop UI behavior depends on the current Codex App version and platform.",
+        "portUnavailable": "The configured local proxy port is not listening. Start the proxy app or disable this option to prevent repeated Codex reconnects.",
+        "envTxtDetected": "An .env.txt file was detected. Windows may be hiding extensions; Codex only reads a file named .env."
+      },
       "pricingDefaultsTitle": "Pricing Defaults",
       "pricingDefaultsDescription": "Set the default multiplier and pricing model source per app.",
       "pricingAppLabel": "App",

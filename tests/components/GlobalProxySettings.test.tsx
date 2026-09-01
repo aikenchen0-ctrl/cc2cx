@@ -9,9 +9,13 @@ vi.mock("react-i18next", () => ({
 const mutateAsyncMock = vi.fn();
 const testMutateAsyncMock = vi.fn();
 const scanMutateAsyncMock = vi.fn();
+const codexProxyMutateAsyncMock = vi.fn();
 
 vi.mock("@/hooks/useGlobalProxy", () => ({
-  useGlobalProxyUrl: () => ({ data: "http://127.0.0.1:7890", isLoading: false }),
+  useGlobalProxyUrl: () => ({
+    data: "http://127.0.0.1:7890",
+    isLoading: false,
+  }),
   useSetGlobalProxyUrl: () => ({
     mutateAsync: mutateAsyncMock,
     isPending: false,
@@ -24,6 +28,21 @@ vi.mock("@/hooks/useGlobalProxy", () => ({
     mutateAsync: scanMutateAsyncMock,
     isPending: false,
   }),
+  useCodexProxyStatus: () => ({
+    data: {
+      enabled: false,
+      path: "C:/Users/test/.codex/.env",
+      proxyUrl: null,
+      backupPath: null,
+      portReachable: null,
+      envTxtDetected: false,
+    },
+    isLoading: false,
+  }),
+  useSetCodexProxyEnabled: () => ({
+    mutateAsync: codexProxyMutateAsyncMock,
+    isPending: false,
+  }),
 }));
 
 describe("GlobalProxySettings", () => {
@@ -31,6 +50,12 @@ describe("GlobalProxySettings", () => {
     mutateAsyncMock.mockReset();
     testMutateAsyncMock.mockReset();
     scanMutateAsyncMock.mockReset();
+    codexProxyMutateAsyncMock.mockReset();
+    testMutateAsyncMock.mockResolvedValue({
+      success: true,
+      latencyMs: 10,
+      error: null,
+    });
   });
 
   it("renders proxy URL input with saved value", async () => {
@@ -40,9 +65,7 @@ describe("GlobalProxySettings", () => {
       "http://127.0.0.1:7890 / socks5://127.0.0.1:1080",
     );
     // URL 对象会在末尾添加斜杠
-    await waitFor(() =>
-      expect(urlInput).toHaveValue("http://127.0.0.1:7890/"),
-    );
+    await waitFor(() => expect(urlInput).toHaveValue("http://127.0.0.1:7890/"));
   });
 
   it("saves proxy URL when save button is clicked", async () => {
@@ -70,14 +93,26 @@ describe("GlobalProxySettings", () => {
     );
 
     // Wait for initial value to load
-    await waitFor(() =>
-      expect(urlInput).toHaveValue("http://127.0.0.1:7890/"),
-    );
+    await waitFor(() => expect(urlInput).toHaveValue("http://127.0.0.1:7890/"));
 
     // Click clear button
     const clearButton = screen.getByTitle("settings.globalProxy.clear");
     fireEvent.click(clearButton);
 
     expect(urlInput).toHaveValue("");
+  });
+
+  it("syncs the saved proxy to Codex when the Codex switch is enabled", async () => {
+    render(<GlobalProxySettings />);
+
+    const toggle = screen.getByRole("switch", {
+      name: "settings.globalProxy.codex.enable",
+    });
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(codexProxyMutateAsyncMock).toHaveBeenCalledWith(true),
+    );
+    expect(testMutateAsyncMock).toHaveBeenCalledWith("http://127.0.0.1:7890/");
   });
 });

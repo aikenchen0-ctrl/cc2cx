@@ -882,6 +882,17 @@
       "saveFailed": "保存失败：{{error}}",
       "testSuccess": "连接成功！延迟 {{latency}}ms",
       "testFailed": "连接失败：{{error}}",
+      "codex": {
+        "enable": "将此代理同步到 Codex",
+        "description": "安全更新 Codex 配置目录中的 .env，优先修复 CLI、app-server、HTTPS 与 WebSocket。不会修改系统环境变量，也不会覆盖其他 .env 内容。",
+        "enabled": "Codex 代理已启用",
+        "disabled": "Codex 代理已关闭",
+        "failed": "更新 Codex 代理失败：{{error}}",
+        "statusFailed": "读取 Codex 代理状态失败：{{error}}",
+        "restartHint": "请完全退出并重新启动 Codex。桌面界面是否生效取决于当前 Codex App 版本和平台。",
+        "portUnavailable": "配置的本地代理端口当前没有监听。请启动代理软件或关闭此开关，避免 Codex 持续重连。",
+        "envTxtDetected": "检测到 .env.txt。Windows 可能隐藏了扩展名；Codex 只读取名称为 .env 的文件。"
+      },
       "pricingDefaultsTitle": "计费默认配置",
       "pricingDefaultsDescription": "设置各应用的默认倍率与计费模式来源。",
       "pricingAppLabel": "应用",

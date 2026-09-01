@@ -13,6 +13,8 @@ import {
   testProxyUrl,
   getUpstreamProxyStatus,
   scanLocalProxies,
+  getCodexProxyEnvStatus,
+  setCodexProxyEnv,
   type ProxyTestResult,
   type UpstreamProxyStatus,
   type DetectedProxy,
@@ -102,6 +104,36 @@ export function useScanProxies() {
       toast.error(
         t("settings.globalProxy.scanFailed", { error: error.message }),
       );
+    },
+  });
+}
+
+export function useCodexProxyStatus() {
+  return useQuery({
+    queryKey: ["codexProxyEnvStatus"],
+    queryFn: getCodexProxyEnvStatus,
+  });
+}
+
+export function useSetCodexProxyEnabled(proxyUrl: string) {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: (enabled: boolean) => setCodexProxyEnv(enabled ? proxyUrl : ""),
+    onSuccess: (status) => {
+      toast.success(
+        t(
+          status.enabled
+            ? "settings.globalProxy.codex.enabled"
+            : "settings.globalProxy.codex.disabled",
+        ),
+      );
+      queryClient.setQueryData(["codexProxyEnvStatus"], status);
+    },
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t("settings.globalProxy.codex.failed", { error: message }));
     },
   });
 }

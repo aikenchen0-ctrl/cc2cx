@@ -882,6 +882,17 @@
       "saveFailed": "保存に失敗しました: {{error}}",
       "testSuccess": "接続成功！遅延 {{latency}}ms",
       "testFailed": "接続に失敗しました: {{error}}",
+      "codex": {
+        "enable": "このプロキシを Codex に同期",
+        "description": "Codex 設定ディレクトリの .env を安全に更新し、CLI、app-server、HTTPS、WebSocket を優先的に修復します。システム環境変数や他の .env 内容は変更しません。",
+        "enabled": "Codex プロキシを有効にしました",
+        "disabled": "Codex プロキシを無効にしました",
+        "failed": "Codex プロキシの更新に失敗しました：{{error}}",
+        "statusFailed": "Codex プロキシ状態の読み取りに失敗しました：{{error}}",
+        "restartHint": "Codex を完全に終了して再起動してください。デスクトップ UI への適用は Codex App のバージョンとプラットフォームに依存します。",
+        "portUnavailable": "設定されたローカルプロキシポートが待ち受けていません。プロキシアプリを起動するか、この設定を無効にしてください。",
+        "envTxtDetected": ".env.txt が検出されました。Windows が拡張子を非表示にしている可能性があります。Codex が読み込むのは .env という名前のファイルだけです。"
+      },
       "pricingDefaultsTitle": "課金のデフォルト設定",
       "pricingDefaultsDescription": "アプリごとのデフォルト倍率と課金モードを設定します。",
       "pricingAppLabel": "アプリ",
