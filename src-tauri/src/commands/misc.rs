@@ -1164,7 +1164,7 @@ async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Resul
         let applications = home.join("Applications");
         std::fs::create_dir_all(&applications)
             .map_err(|error| format!("创建用户应用目录失败: {error}"))?;
-        let destination = applications.join(app_bundle);
+        let destination = applications.join(&app_bundle);
         let copy_status = std::process::Command::new("ditto")
             .arg(&source)
             .arg(&destination)
