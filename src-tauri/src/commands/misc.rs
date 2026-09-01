@@ -1156,7 +1156,7 @@ async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Resul
             ));
         }
 
-        let source = find_app_bundle(&extract_dir, app_bundle)
+        let source = find_app_bundle(&extract_dir, &app_bundle)
             .ok_or_else(|| format!("安装包中未找到 {app_bundle}"))?;
         let home = std::env::var("HOME")
             .map(PathBuf::from)
