@@ -65,12 +65,6 @@
 6. 在 MCP、Skills、Prompt 页面按需同步配置。
 7. 如修改了命令行工具的配置，重新打开对应终端或 Agent。
 
-## 界面预览
-
-![主界面](assets/screenshots/main-zh.png)
-
-![添加供应商](assets/screenshots/add-zh.png)
-
 ## 安装与下载
 
 正式安装包会发布在 [GitHub Releases](https://github.com/aikenchen0-ctrl/cc2cx/releases)。请根据系统和架构选择对应产物：
