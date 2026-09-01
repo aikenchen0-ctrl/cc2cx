@@ -1,0 +1,74 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.95
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+
+      - name: Install locked dependencies
+        shell: bash
+        run: |
+          corepack enable
+          corepack pnpm@10.12.3 install --frozen-lockfile
+
+      - name: Build unsigned macOS bundles
+        shell: bash
+        env:
+          CI: true
+        run: |
+          corepack pnpm@10.12.3 tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles app,dmg \
+            --config src-tauri/tauri.unsigned.conf.json \
+            --no-sign
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          bundle_dir="src-tauri/target/${{ matrix.target }}/release/bundle"
+          find "$bundle_dir" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) -print0 \
+            | xargs -0 shasum -a 256 > "checksums-${{ matrix.arch }}.txt"
+
+      - name: Upload macOS bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc2cx-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle
+            checksums-${{ matrix.arch }}.txt
