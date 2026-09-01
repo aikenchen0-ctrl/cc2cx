@@ -1,0 +1,76 @@
+{
+  "name": "@haibane/cc-boot",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "One-command bootstrap for AI coding CLI tools — installs, configures, then hands off to CC Switch",
+  "author": "hanwang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wh000wh000/cc-boot"
+  },
+  "homepage": "https://github.com/wh000wh000/cc-boot#readme",
+  "bugs": {
+    "url": "https://github.com/wh000wh000/cc-boot/issues"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "bootstrap",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "opencode",
+    "openclaw",
+    "cc-launch",
+    "mcp",
+    "developer-tools"
+  ],
+  "bin": {
+    "cc-boot": "dist/cli.mjs"
+  },
+  "main": "dist/index.mjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "unbuild",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@rainbowatcher/toml-edit-js": "^0.6.4",
+    "ansis": "^4.1.0",
+    "cac": "^6.7.14",
+    "fs-extra": "^11.3.2",
+    "i18next": "^25.5.2",
+    "inquirer": "^12.9.6",
+    "ora": "^9.0.0",
+    "pathe": "^2.0.3",
+    "tinyexec": "^1.0.1",
+    "zcf": "^3.6.2"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.18.6",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "unbuild": "^3.6.1",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

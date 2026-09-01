@@ -1,0 +1,13 @@
+packages:
+  - integrations/cc-boot
+
+onlyBuiltDependencies:
+  - '@tailwindcss/oxide'
+  - esbuild
+
+ignoredBuiltDependencies:
+  - msw
+
+allowBuilds:
+  esbuild: true
+  msw: false

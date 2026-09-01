@@ -1,0 +1,124 @@
+# Dependencies and package manager files
+node_modules/
+**/node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.pnp.*
+*.tgz
+pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local package manager configuration (may contain registry credentials)
+.npmrc
+
+# Frontend build output and caches
+dist/
+**/dist/
+dist-electron/
+release/
+**/release/
+out/
+.vite/
+**/.vite/
+.cache/
+**/.cache/
+.turbo/
+**/.turbo/
+.eslintcache
+*.tsbuildinfo
+
+# Rust and Tauri build output
+target/
+**/target/
+.cargo-test-secret-fix/
+src-tauri/.tauri/
+src-tauri/*.msi
+src-tauri/*.exe
+src-tauri/*.dmg
+src-tauri/*.AppImage
+src-tauri/*.deb
+src-tauri/*.rpm
+src-tauri/*.sig
+src-tauri/target/release/bundle/
+src-tauri/target/debug/bundle/
+*.nsis.zip
+*.nsis.zip.sig
+*.msi.zip
+*.msi.zip.sig
+
+# Test, coverage, and browser reports
+coverage/
+**/coverage/
+.nyc_output/
+test-results/
+playwright-report/
+vitest-report.json
+*.snap.new
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.key
+*.pem
+*.p12
+
+# Application runtime data, databases, and logs
+.cc-switch/
+**/.cc-switch/
+.cc-launch/
+**/.cc-launch/
+.cc-boot/
+**/.cc-boot/
+logs/
+**/logs/
+*.log
+*.dmp
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.cache
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+
+# Local AI tools, worktrees, and history
+.claude/
+.codex/
+.gemini/
+.spec-workflow/
+.worktrees/
+.history/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+CODEBUDDY.md
+
+# Flatpak and local packaging output
+flatpak-build/
+flatpak-repo/
+flatpak/cc-switch.deb
+flatpak/cc-launch.deb
+
+# Temporary and backup files
+nul
+*.tmp
+*.temp
+*.bak
+mainWindow.js

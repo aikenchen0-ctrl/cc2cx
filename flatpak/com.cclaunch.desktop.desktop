@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=cc-launch
+Comment=All-in-One Assistant for Claude Code, Codex & Gemini CLI
+Exec=cc-launch
+Icon=com.cclaunch.desktop
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
