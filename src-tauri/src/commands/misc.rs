@@ -1119,7 +1119,8 @@ async fn install_workbuddy_archive(archive_path: PathBuf) -> Result<(), String> 
 
     #[cfg(target_os = "macos")]
     {
-        install_macos_zip_app(archive_path, "WorkBuddy.app").await?
+        install_macos_zip_app(archive_path, "WorkBuddy.app").await?;
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -1131,6 +1132,7 @@ async fn install_workbuddy_archive(archive_path: PathBuf) -> Result<(), String> 
 
 #[cfg(target_os = "macos")]
 async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Result<(), String> {
+    let app_bundle = app_bundle.to_string();
     tokio::task::spawn_blocking(move || {
         let extract_dir = std::env::temp_dir().join(format!(
             "cc-launch-desktop-extract-{}-{}",
