@@ -34,12 +34,24 @@ export interface AgentInstallOutput {
 
 export type AgentInstallPhase = "prepare" | "install" | "verify" | "complete";
 export type AgentInstallProgressStatus = "running" | "success" | "error";
+export type AgentInstallStage =
+  | "prepare"
+  | "resolve"
+  | "download"
+  | "install"
+  | "verify"
+  | "complete";
+export type AgentInstallProgressUnit = "bytes" | "lines" | "items";
 
 export interface AgentInstallProgress {
   agent_id: string;
   phase: AgentInstallPhase;
   status: AgentInstallProgressStatus;
   progress: number | null;
+  stage?: AgentInstallStage;
+  current?: number | null;
+  total?: number | null;
+  unit?: AgentInstallProgressUnit;
   message: string;
 }
 

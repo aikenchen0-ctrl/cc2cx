@@ -267,6 +267,10 @@ pub struct AgentInstallProgress {
     phase: String,
     status: String,
     progress: Option<u8>,
+    stage: String,
+    current: Option<u64>,
+    total: Option<u64>,
+    unit: Option<String>,
     message: String,
 }
 
@@ -636,7 +640,7 @@ async fn download_file<F>(
     mut on_progress: F,
 ) -> Result<(), String>
 where
-    F: FnMut(u8),
+    F: FnMut(DownloadProgress),
 {
     let mut response = client
         .get(url)
@@ -653,6 +657,8 @@ where
     let total_bytes = response.content_length();
     let mut downloaded_bytes = 0_u64;
     let mut last_progress = None;
+    let mut last_reported_bytes = 0_u64;
+    let mut last_reported_at = std::time::Instant::now();
     while let Some(chunk) = response
         .chunk()
         .await
@@ -663,20 +669,41 @@ where
         file.write_all(&chunk)
             .await
             .map_err(|error| format!("写入安装包临时文件失败: {error}"))?;
-        if let Some(total_bytes) = total_bytes {
-            let current_progress =
-                ((downloaded_bytes.saturating_mul(100) / total_bytes).min(100)) as u8;
-            if last_progress != Some(current_progress) {
-                last_progress = Some(current_progress);
-                on_progress(current_progress);
-            }
+        let current_progress = total_bytes
+            .filter(|total| *total > 0)
+            .map(|total| (downloaded_bytes.saturating_mul(100) / total).min(100) as u8);
+        let enough_bytes = downloaded_bytes.saturating_sub(last_reported_bytes) >= 256 * 1024;
+        let enough_time = last_reported_at.elapsed() >= std::time::Duration::from_millis(150);
+        if last_progress != current_progress || enough_bytes || enough_time {
+            last_progress = current_progress;
+            last_reported_bytes = downloaded_bytes;
+            last_reported_at = std::time::Instant::now();
+            on_progress(DownloadProgress {
+                downloaded_bytes,
+                total_bytes,
+                percent: current_progress,
+            });
         }
     }
     file.flush()
         .await
         .map_err(|error| format!("刷新安装包临时文件失败: {error}"))?;
+    if last_progress != Some(100) {
+        on_progress(DownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            percent: Some(100),
+        });
+    }
     let _ = hasher.finalize();
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u8>,
 }
 
 async fn download_verified_file<F>(
@@ -687,7 +714,7 @@ async fn download_verified_file<F>(
     on_progress: F,
 ) -> Result<(), String>
 where
-    F: FnMut(u8),
+    F: FnMut(DownloadProgress),
 {
     download_file(client, url, destination, on_progress).await?;
     let bytes = tokio::fs::read(destination)
@@ -747,7 +774,7 @@ async fn download_workbuddy_package<F>(
     on_progress: F,
 ) -> Result<(), String>
 where
-    F: FnMut(u8),
+    F: FnMut(DownloadProgress),
 {
     if !expected_sha256.trim().is_empty() {
         return download_verified_file(client, url, expected_sha256, destination, on_progress)
@@ -958,14 +985,26 @@ async fn install_workbuddy(app: &AppHandle) -> Result<(), String> {
             &metadata.url,
             workbuddy_expected_hash(&metadata),
             &archive_path,
-            |progress| {
-                emit_agent_install_progress(
+            |download| {
+                emit_agent_install_progress_detail(
                     app,
                     "workbuddy",
                     "install",
                     "running",
-                    Some(10 + (progress.saturating_mul(70) / 100)),
-                    format!("正在下载 WorkBuddy 安装包 {progress}%"),
+                    download
+                        .percent
+                        .map(|progress| 10 + (progress.saturating_mul(70) / 100)),
+                    "download",
+                    Some(download.downloaded_bytes),
+                    download.total_bytes,
+                    Some("bytes"),
+                    format!(
+                        "正在下载 WorkBuddy 安装包{}",
+                        download
+                            .percent
+                            .map(|progress| format!(" {progress}%"))
+                            .unwrap_or_default()
+                    ),
                 );
             },
         )
@@ -1048,14 +1087,26 @@ async fn install_codex_ui(app: &AppHandle) -> Result<(), String> {
         .ok_or_else(|| "当前 Mac 架构没有可用的 ChatGPT/Codex 安装包".to_string())?;
     let archive_path =
         std::env::temp_dir().join(format!("cc-launch-chatgpt-{}.zip", std::process::id()));
-    download_verified_file(&client, &url, &sha256, &archive_path, |progress| {
-        emit_agent_install_progress(
+    download_verified_file(&client, &url, &sha256, &archive_path, |download| {
+        emit_agent_install_progress_detail(
             app,
             "codex-ui",
             "install",
             "running",
-            Some(10 + (progress.saturating_mul(70) / 100)),
-            format!("正在下载 Codex UI 安装包 {progress}%"),
+            download
+                .percent
+                .map(|progress| 10 + (progress.saturating_mul(70) / 100)),
+            "download",
+            Some(download.downloaded_bytes),
+            download.total_bytes,
+            Some("bytes"),
+            format!(
+                "正在下载 Codex UI 安装包{}",
+                download
+                    .percent
+                    .map(|progress| format!(" {progress}%"))
+                    .unwrap_or_default()
+            ),
         );
     })
     .await?;
@@ -1776,6 +1827,29 @@ fn emit_agent_install_progress(
     progress: Option<u8>,
     message: impl Into<String>,
 ) {
+    let stage = match phase {
+        "prepare" => "prepare",
+        "verify" => "verify",
+        "complete" => "complete",
+        _ => "install",
+    };
+    emit_agent_install_progress_detail(
+        app, agent_id, phase, status, progress, stage, None, None, None, message,
+    );
+}
+
+fn emit_agent_install_progress_detail(
+    app: &AppHandle,
+    agent_id: &str,
+    phase: &str,
+    status: &str,
+    progress: Option<u8>,
+    stage: &str,
+    current: Option<u64>,
+    total: Option<u64>,
+    unit: Option<&str>,
+    message: impl Into<String>,
+) {
     let _ = app.emit(
         "agent-install-progress",
         AgentInstallProgress {
@@ -1783,6 +1857,10 @@ fn emit_agent_install_progress(
             phase: phase.to_string(),
             status: status.to_string(),
             progress,
+            stage: stage.to_string(),
+            current,
+            total,
+            unit: unit.map(str::to_string),
             message: message.into(),
         },
     );
@@ -1799,17 +1877,39 @@ fn parse_install_progress(line: &str) -> Option<u8> {
     digits.parse::<u8>().ok().filter(|value| *value <= 100)
 }
 
+fn classify_install_stage(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("idealtree")
+        || lower.contains("resolve")
+        || lower.contains("dependency")
+        || lower.contains("metadata")
+    {
+        "resolve"
+    } else if lower.contains("download") || lower.contains("http fetch") || lower.contains("fetch ")
+    {
+        "download"
+    } else if lower.contains("audit") || lower.contains("verify") || lower.contains("validat") {
+        "verify"
+    } else {
+        "install"
+    }
+}
+
 fn run_agent_install_with_output(
     app: &AppHandle,
     agent_id: &str,
     command_line: &str,
 ) -> Result<(), String> {
-    emit_agent_install_progress(
+    emit_agent_install_progress_detail(
         app,
         agent_id,
         "install",
         "running",
         Some(0),
+        "install",
+        None,
+        None,
+        None,
         "正在执行安装任务",
     );
     let result = run_agent_install_with_output_inner(app, agent_id, command_line);
@@ -1909,19 +2009,26 @@ fn run_agent_install_with_output_inner(
         }
     });
     drop(sender);
+    let mut output_lines = 0_u64;
     for (stream, line) in receiver {
+        output_lines = output_lines.saturating_add(1);
+        let stage = classify_install_stage(&line);
         let parsed_progress = parse_install_progress(&line);
         emit_agent_install_output(app, agent_id, stream, line);
-        if let Some(progress) = parsed_progress {
-            emit_agent_install_progress(
-                app,
-                agent_id,
-                "install",
-                "running",
-                Some(progress.min(89)),
-                format!("安装进度 {progress}%"),
-            );
-        }
+        emit_agent_install_progress_detail(
+            app,
+            agent_id,
+            "install",
+            "running",
+            parsed_progress.map(|progress| progress.min(89)),
+            stage,
+            Some(output_lines),
+            None,
+            Some("lines"),
+            parsed_progress
+                .map(|progress| format!("安装进度 {progress}% · 已接收 {output_lines} 条输出"))
+                .unwrap_or_else(|| format!("安装任务进行中 · 已接收 {output_lines} 条输出")),
+        );
     }
     let status = child
         .wait()
@@ -9030,6 +9137,17 @@ mod tests {
         assert_eq!(parse_install_progress("npm 10.2.3"), None);
         assert_eq!(parse_install_progress("100% complete"), Some(100));
         assert_eq!(parse_install_progress("101% complete"), None);
+    }
+
+    #[test]
+    fn classify_install_output_exposes_fine_grained_stages() {
+        assert_eq!(
+            classify_install_stage("idealTree resolve dependencies"),
+            "resolve"
+        );
+        assert_eq!(classify_install_stage("https fetch GET 200"), "download");
+        assert_eq!(classify_install_stage("added 42 packages"), "install");
+        assert_eq!(classify_install_stage("audited 42 packages"), "verify");
     }
 
     #[test]

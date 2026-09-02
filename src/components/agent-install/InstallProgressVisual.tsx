@@ -5,6 +5,8 @@ import {
   CircleDashed,
   Cpu,
   DownloadCloud,
+  FileSearch,
+  PackageCheck,
   Radar,
   Rocket,
   ScanSearch,
@@ -12,6 +14,7 @@ import {
 import type {
   AgentInstallPhase,
   AgentInstallProgress,
+  AgentInstallStage,
 } from "@/lib/api/agentInstall";
 
 const PHASE_LABELS: Record<AgentInstallPhase, string> = {
@@ -27,11 +30,59 @@ const ONBOARDING_STEPS = [
   { label: "安装 Agent", icon: Rocket },
 ];
 
+const DETAIL_STAGE_STEPS: Array<{
+  id: AgentInstallStage;
+  label: string;
+  icon: typeof Cpu;
+}> = [
+  { id: "prepare", label: "环境准备", icon: Cpu },
+  { id: "resolve", label: "解析来源", icon: FileSearch },
+  { id: "download", label: "下载文件", icon: DownloadCloud },
+  { id: "verify", label: "完整性校验", icon: PackageCheck },
+  { id: "install", label: "执行安装", icon: Rocket },
+  { id: "complete", label: "完成检测", icon: Check },
+];
+
+const PHASE_DEFAULT_STAGES: Record<AgentInstallPhase, AgentInstallStage> = {
+  prepare: "prepare",
+  install: "install",
+  verify: "verify",
+  complete: "complete",
+};
+
 function activeStepForPhase(phase: AgentInstallPhase | null): number {
   if (phase === "prepare") return 1;
   if (phase === "install" || phase === "verify") return 2;
   if (phase === "complete") return 3;
   return 0;
+}
+
+function formatBytes(bytes: number): string {
+  const trimDecimal = (value: number, digits: number) =>
+    value.toFixed(digits).replace(/\.0+$/, "");
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${trimDecimal(bytes / 1024, 1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${trimDecimal(bytes / (1024 * 1024), 1)} MB`;
+  return `${trimDecimal(bytes / (1024 * 1024 * 1024), 2)} GB`;
+}
+
+function progressDetail(progress: AgentInstallProgress): string | null {
+  if (progress.current == null) return null;
+  if (progress.unit === "bytes") {
+    const current = formatBytes(progress.current);
+    return progress.total != null
+      ? `${current} / ${formatBytes(progress.total)}`
+      : `${current} 已处理`;
+  }
+  if (progress.unit === "lines") {
+    return progress.total != null
+      ? `${progress.current} / ${progress.total} 条输出`
+      : `${progress.current} 条输出`;
+  }
+  return progress.total != null
+    ? `${progress.current} / ${progress.total}`
+    : `${progress.current} 项`;
 }
 
 export function InstallOnboardingVisual({
@@ -144,6 +195,11 @@ export function InstallProgressVisual({
     : localProgress;
   const failed = progress.status === "error";
   const complete = progress.status === "success";
+  const activeStage = progress.stage ?? PHASE_DEFAULT_STAGES[progress.phase];
+  const activeStageIndex = DETAIL_STAGE_STEPS.findIndex(
+    (step) => step.id === activeStage,
+  );
+  const detail = progressDetail(progress);
 
   return (
     <motion.section
@@ -194,6 +250,37 @@ export function InstallProgressVisual({
             </div>
           </div>
         </div>
+        <ol
+          aria-label="安装细分阶段"
+          className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6"
+        >
+          {DETAIL_STAGE_STEPS.map(({ id, label, icon: Icon }, index) => {
+            const stageComplete = complete || index < activeStageIndex;
+            const stageCurrent = !complete && index === activeStageIndex;
+            return (
+              <li
+                key={id}
+                className={`flex min-w-0 items-center gap-2 rounded-md border px-2 py-2 text-xs ${
+                  stageComplete || stageCurrent
+                    ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-100"
+                    : "border-slate-800 bg-slate-900/70 text-slate-500"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{label}</span>
+              </li>
+            );
+          })}
+        </ol>
+        {detail && (
+          <div
+            data-testid="agent-install-progress-detail"
+            className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2 font-mono text-[11px] text-slate-300"
+          >
+            <span>{progress.unit === "bytes" ? "下载量" : "安装活动"}</span>
+            <span className="text-cyan-200">{detail}</span>
+          </div>
+        )}
         <div
           role="progressbar"
           aria-label="Agent 安装进度"

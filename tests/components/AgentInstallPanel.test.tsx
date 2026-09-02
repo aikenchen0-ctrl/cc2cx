@@ -333,4 +333,31 @@ describe("AgentInstallPanel", () => {
     expect(await screen.findByText("正在验证 Codex")).toBeInTheDocument();
     expect(screen.getByText("88%")).toBeInTheDocument();
   });
+
+  it("renders fine-grained stage and byte progress details", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(agentInstallApi.ensureNodeRuntime).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    await waitFor(() => expect(progressHandler).toBeDefined());
+
+    act(() => {
+      progressHandler?.({
+        agent_id: "node-runtime",
+        phase: "install",
+        stage: "download",
+        status: "running",
+        progress: 42,
+        current: 1048576,
+        total: 2097152,
+        unit: "bytes",
+        message: "正在下载 Node.js",
+      });
+    });
+
+    expect(await screen.findByText("下载文件")).toBeInTheDocument();
+    expect(screen.getByText(/1 MB \/ 2 MB/)).toBeInTheDocument();
+  });
 });
