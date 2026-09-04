@@ -13,6 +13,7 @@ import {
   type AgentInstallStatus,
   type AgentInstallProgress,
 } from "@/lib/api/agentInstall";
+import { legacyMigrationApi } from "@/lib/api/legacyMigration";
 
 let progressHandler: ((progress: AgentInstallProgress) => void) | undefined;
 
@@ -29,6 +30,13 @@ vi.mock("@/lib/api/agentInstall", () => ({
         progressHandler = undefined;
       };
     }),
+  },
+}));
+
+vi.mock("@/lib/api/legacyMigration", () => ({
+  legacyMigrationApi: {
+    detect: vi.fn(),
+    openUninstall: vi.fn(),
   },
 }));
 
@@ -476,5 +484,41 @@ describe("AgentInstallPanel", () => {
       await screen.findByTestId("agent-install-floating-progress"),
     ).toBeInTheDocument();
     expect(screen.getByText("35%")).toBeInTheDocument();
+  });
+
+  it("auto-selects the newest discovered CC Switch SQL export and keeps manual choice", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(legacyMigrationApi.detect).mockResolvedValue({
+      detected: true,
+      data_dir: "C:\\Users\\Test\\.cc-switch",
+      database_path: "C:\\Users\\Test\\.cc-switch\\cc-switch.db",
+      config_path: null,
+      skills_dir: null,
+      backups_dir: "C:\\Users\\Test\\.cc-switch\\backups",
+      install_paths: [],
+      sql_exports: [
+        {
+          path: "C:\\Users\\Test\\Downloads\\cc-switch-latest.sql",
+          size_bytes: 2048,
+          modified_at: 200,
+        },
+        {
+          path: "C:\\Users\\Test\\.cc-switch\\backups\\old.sql",
+          size_bytes: 1024,
+          modified_at: 100,
+        },
+      ],
+    });
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    const select = await screen.findByRole("combobox", {
+      name: /自动选择.*SQL|SQL.*自动选择/,
+    });
+    expect(select).toHaveValue(
+      "C:\\Users\\Test\\Downloads\\cc-switch-latest.sql",
+    );
+    expect(
+      screen.getByRole("button", { name: /手动选择.*SQL/ }),
+    ).toBeInTheDocument();
   });
 });

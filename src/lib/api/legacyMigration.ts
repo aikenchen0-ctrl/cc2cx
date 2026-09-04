@@ -8,6 +8,13 @@ export interface LegacyCcSwitchStatus {
   skills_dir: string | null;
   backups_dir: string | null;
   install_paths: string[];
+  sql_exports?: LegacySqlExportCandidate[];
+}
+
+export interface LegacySqlExportCandidate {
+  path: string;
+  size_bytes: number;
+  modified_at: number;
 }
 
 export const legacyMigrationApi = {

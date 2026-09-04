@@ -86,6 +86,9 @@ export function AgentInstallPanel({
   const [legacyStatus, setLegacyStatus] = useState<LegacyCcSwitchStatus | null>(
     null,
   );
+  const [selectedLegacySql, setSelectedLegacySql] = useState<string | null>(
+    null,
+  );
   const [legacyBusy, setLegacyBusy] = useState(false);
   const [legacyMessage, setLegacyMessage] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -148,6 +151,7 @@ export function AgentInstallPanel({
     try {
       const status = await legacyMigrationApi.detect();
       setLegacyStatus(status);
+      setSelectedLegacySql(status.sql_exports?.[0]?.path ?? null);
       setLegacyMessage(
         status.detected
           ? "已发现旧 CC Switch 痕迹，请先备份再同步。/ Legacy CC Switch data found; back up before syncing."
@@ -162,11 +166,16 @@ export function AgentInstallPanel({
     }
   };
 
+  useEffect(() => {
+    if (isOpen) void detectLegacy();
+  }, [isOpen]);
+
   const importLegacy = async () => {
     setLegacyBusy(true);
     setLegacyMessage(null);
     try {
-      const filePath = await settingsApi.openFileDialog();
+      const filePath =
+        selectedLegacySql ?? (await settingsApi.openFileDialog());
       if (!filePath) return;
       await settingsApi.importConfigFromFile(filePath);
       await load();
@@ -369,6 +378,51 @@ export function AgentInstallPanel({
                 打开卸载入口 / Uninstall settings
               </Button>
             </div>
+            {legacyStatus?.sql_exports &&
+              legacyStatus.sql_exports.length > 0 && (
+                <div className="space-y-2">
+                  <label
+                    htmlFor="legacy-sql-export"
+                    className="text-xs font-medium text-foreground"
+                  >
+                    自动选择最新导出 / Auto-selected SQL export
+                  </label>
+                  <select
+                    id="legacy-sql-export"
+                    aria-label="自动选择 SQL 导出文件 / Auto-selected SQL export"
+                    value={selectedLegacySql ?? ""}
+                    onChange={(event) =>
+                      setSelectedLegacySql(event.target.value)
+                    }
+                    className="h-9 w-full border border-border-default bg-background px-3 text-xs font-mono text-foreground"
+                  >
+                    {legacyStatus.sql_exports.map((candidate) => (
+                      <option key={candidate.path} value={candidate.path}>
+                        {candidate.path} (
+                        {Math.ceil(candidate.size_bytes / 1024)} KB)
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    已自动选中最近修改的有效导出文件；也可以手动选择其他 SQL。/
+                    The newest valid export is selected; you can choose another
+                    SQL file manually.
+                  </p>
+                </div>
+              )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() =>
+                void settingsApi.openFileDialog().then((path) => {
+                  if (path) setSelectedLegacySql(path);
+                })
+              }
+              disabled={legacyBusy}
+            >
+              <ExternalLink className="mr-2 h-4 w-4" />
+              手动选择其他 SQL / Choose another SQL
+            </Button>
             {legacyStatus?.detected && (
               <div className="space-y-1 text-xs text-amber-600 dark:text-amber-400">
                 <div>

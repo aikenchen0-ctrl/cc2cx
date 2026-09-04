@@ -5,6 +5,12 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.3] - 2026-09-04
+
+### Improved
+
+- **CC Switch SQL 自动发现**：打开 Agent 安装页时自动扫描旧 CC Switch 数据目录、备份目录和常见下载目录，只展示带 CC Switch 导出标记的 SQL，并默认选中最近修改的文件；仍可手动选择其他 SQL 文件。
+
 ## [3.20.2] - 2026-09-04
 
 ### Added

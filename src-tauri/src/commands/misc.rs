@@ -289,6 +289,82 @@ pub struct LegacyCcSwitchStatus {
     skills_dir: Option<String>,
     backups_dir: Option<String>,
     install_paths: Vec<String>,
+    sql_exports: Vec<LegacySqlExportCandidate>,
+}
+
+#[derive(serde::Serialize)]
+pub struct LegacySqlExportCandidate {
+    path: String,
+    size_bytes: u64,
+    modified_at: u64,
+}
+
+fn discover_legacy_sql_exports(
+    home: &Path,
+    data_dir: &Path,
+    backups_dir: &Path,
+) -> Vec<LegacySqlExportCandidate> {
+    let mut roots = vec![data_dir.to_path_buf(), backups_dir.to_path_buf()];
+    for name in ["Downloads", "Desktop", "Documents"] {
+        roots.push(home.join(name));
+    }
+    let mut candidates = Vec::new();
+    let mut stack: Vec<(PathBuf, u8)> = roots
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .map(|root| (root, 0))
+        .collect();
+    while let Some((directory, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && depth < 2 {
+                stack.push((path, depth + 1));
+                continue;
+            }
+            if !path.is_file()
+                || !path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+            {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !content
+                .trim_start_matches('\u{feff}')
+                .starts_with("-- CC Switch SQLite 导出")
+            {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let modified_at = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            candidates.push(LegacySqlExportCandidate {
+                path: path.to_string_lossy().into_owned(),
+                size_bytes: metadata.len(),
+                modified_at,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    candidates.dedup_by(|left, right| left.path == right.path);
+    candidates
 }
 
 fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
@@ -345,6 +421,7 @@ fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
             .is_dir()
             .then(|| backups_dir.to_string_lossy().into_owned()),
         install_paths,
+        sql_exports: discover_legacy_sql_exports(home, &data_dir, &backups_dir),
     }
 }
 
@@ -9423,6 +9500,27 @@ mod tests {
             before
         );
         assert!(!data_dir.join("cc-launch.db").exists());
+    }
+
+    #[test]
+    fn legacy_sql_discovery_filters_to_cc_switch_exports() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let downloads = temp.path().join("Downloads");
+        let backups = temp.path().join(".cc-switch").join("backups");
+        std::fs::create_dir_all(&downloads).expect("create downloads directory");
+        std::fs::create_dir_all(&backups).expect("create backups directory");
+        let valid = downloads.join("cc-switch-export.sql");
+        let invalid = backups.join("other.sql");
+        std::fs::write(&valid, "-- CC Switch SQLite 导出\nBEGIN TRANSACTION;\n")
+            .expect("write valid export");
+        std::fs::write(&invalid, "SELECT 1;\n").expect("write unrelated sql");
+
+        let candidates =
+            discover_legacy_sql_exports(temp.path(), &temp.path().join(".cc-switch"), &backups);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, valid.to_string_lossy());
+        assert!(candidates[0].size_bytes > 0);
     }
 
     #[test]
