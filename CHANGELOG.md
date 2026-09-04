@@ -5,6 +5,14 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.5] - 2026-09-04
+
+### Fixed
+
+- **WorkBuddy Windows 签名校验**：使用系统 Windows PowerShell 5.1 的绝对路径，避免 PowerShell 7 或 PATH 兼容壳无法加载安全模块。
+- **旧 CC Switch 卸载入口**：优先运行探测到的旧卸载程序或卸载快捷方式，找不到时才打开系统卸载页面。
+- **WSL Agent 启动环境**：Windows 检测到 Agent 配置位于 WSL 时，使用对应发行版和 `wsl.exe` 启动 CLI。
+
 ## [3.20.4] - 2026-09-04
 
 ### Fixed

@@ -2114,6 +2114,11 @@ pub async fn launch_agent(agent_id: String) -> Result<(), String> {
     let tool = spec
         .tool
         .ok_or_else(|| format!("{agent_id} 没有可用启动命令"))?;
+    #[cfg(target_os = "windows")]
+    {
+        return launch_agent_with_environment(tool);
+    }
+    #[cfg(not(target_os = "windows"))]
     launch_terminal_running(tool, &format!("agent_{agent_id}"))
 }
 
@@ -5832,6 +5837,19 @@ fn wsl_unc_path_to_linux(path: &Path) -> Option<String> {
     } else {
         Some(linux)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn launch_agent_with_environment(tool: &str) -> Result<(), String> {
+    if let Some(distro) = wsl_distro_for_tool(tool) {
+        let command = format!(
+            "wsl.exe -d {} -- bash -lic {}",
+            windows_cmd_double_quote_arg(&distro),
+            windows_cmd_double_quote_arg(tool),
+        );
+        return launch_terminal_running(&command, &format!("agent_{tool}_wsl"));
+    }
+    launch_terminal_running(tool, &format!("agent_{tool}"))
 }
 
 #[cfg(target_os = "windows")]
