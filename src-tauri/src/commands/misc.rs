@@ -291,6 +291,63 @@ pub struct LegacyCcSwitchStatus {
     install_paths: Vec<String>,
 }
 
+fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
+    let data_dir = home.join(".cc-switch");
+    let database_path = data_dir.join("cc-switch.db");
+    let config_path = data_dir.join("config.json");
+    let skills_dir = data_dir.join("skills");
+    let backups_dir = data_dir.join("backups");
+    let mut install_paths = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        for path in [
+            home.join("AppData\\Local\\Programs\\CC Switch\\CC Switch.exe"),
+            home.join("AppData\\Local\\CC Switch\\CC Switch.exe"),
+        ] {
+            if path.is_file() {
+                install_paths.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for path in [
+            PathBuf::from("/Applications/CC Switch.app"),
+            home.join("Applications/CC Switch.app"),
+        ] {
+            if path.is_dir() {
+                install_paths.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    let detected = database_path.is_file()
+        || config_path.is_file()
+        || skills_dir.is_dir()
+        || backups_dir.is_dir()
+        || !install_paths.is_empty();
+    LegacyCcSwitchStatus {
+        detected,
+        data_dir: data_dir
+            .is_dir()
+            .then(|| data_dir.to_string_lossy().into_owned()),
+        database_path: database_path
+            .is_file()
+            .then(|| database_path.to_string_lossy().into_owned()),
+        config_path: config_path
+            .is_file()
+            .then(|| config_path.to_string_lossy().into_owned()),
+        skills_dir: skills_dir
+            .is_dir()
+            .then(|| skills_dir.to_string_lossy().into_owned()),
+        backups_dir: backups_dir
+            .is_dir()
+            .then(|| backups_dir.to_string_lossy().into_owned()),
+        install_paths,
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct NodeRuntimeStatus {
     available: bool,
@@ -1907,61 +1964,7 @@ pub async fn launch_agent(agent_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn detect_legacy_cc_switch() -> Result<LegacyCcSwitchStatus, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let home = crate::config::get_home_dir();
-        let data_dir = home.join(".cc-switch");
-        let database_path = data_dir.join("cc-switch.db");
-        let config_path = data_dir.join("config.json");
-        let skills_dir = data_dir.join("skills");
-        let backups_dir = data_dir.join("backups");
-        let mut install_paths = Vec::new();
-
-        #[cfg(target_os = "windows")]
-        {
-            for path in [
-                home.join("AppData\\Local\\Programs\\CC Switch\\CC Switch.exe"),
-                home.join("AppData\\Local\\CC Switch\\CC Switch.exe"),
-            ] {
-                if path.is_file() {
-                    install_paths.push(path.to_string_lossy().into_owned());
-                }
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            for path in [
-                PathBuf::from("/Applications/CC Switch.app"),
-                home.join("Applications/CC Switch.app"),
-            ] {
-                if path.is_dir() {
-                    install_paths.push(path.to_string_lossy().into_owned());
-                }
-            }
-        }
-
-        let detected = database_path.is_file()
-            || config_path.is_file()
-            || skills_dir.is_dir()
-            || backups_dir.is_dir()
-            || !install_paths.is_empty();
-        Ok(LegacyCcSwitchStatus {
-            detected,
-            data_dir: data_dir
-                .is_dir()
-                .then(|| data_dir.to_string_lossy().into_owned()),
-            database_path: database_path
-                .is_file()
-                .then(|| database_path.to_string_lossy().into_owned()),
-            config_path: config_path
-                .is_file()
-                .then(|| config_path.to_string_lossy().into_owned()),
-            skills_dir: skills_dir
-                .is_dir()
-                .then(|| skills_dir.to_string_lossy().into_owned()),
-            backups_dir: backups_dir
-                .is_dir()
-                .then(|| backups_dir.to_string_lossy().into_owned()),
-            install_paths,
-        })
+        Ok(legacy_cc_switch_status(&crate::config::get_home_dir()))
     })
     .await
     .map_err(|error| format!("检测旧 CC Switch 失败: {error}"))?
@@ -9396,6 +9399,30 @@ mod tests {
         )
         .expect("write executable placeholder");
         assert!(is_complete_macos_app_bundle(&app));
+    }
+
+    #[test]
+    fn legacy_cc_switch_detection_is_read_only() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let data_dir = temp.path().join(".cc-switch");
+        std::fs::create_dir_all(&data_dir).expect("create legacy data directory");
+        let database = data_dir.join("cc-switch.db");
+        std::fs::write(&database, b"legacy database").expect("write legacy database");
+        let before = std::fs::read(&database).expect("read legacy database");
+
+        let status = legacy_cc_switch_status(temp.path());
+        let expected_database = database.to_string_lossy().to_string();
+
+        assert!(status.detected);
+        assert_eq!(
+            status.database_path.as_deref(),
+            Some(expected_database.as_str())
+        );
+        assert_eq!(
+            std::fs::read(&database).expect("read legacy database"),
+            before
+        );
+        assert!(!data_dir.join("cc-launch.db").exists());
     }
 
     #[test]
