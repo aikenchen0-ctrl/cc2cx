@@ -5,6 +5,13 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.4] - 2026-09-04
+
+### Fixed
+
+- **WorkBuddy Windows 签名校验**：强制调用系统 Windows PowerShell 5.1 的 `powershell.exe`，避免 PowerShell 7 或 PATH 中的兼容壳无法加载 `Microsoft.PowerShell.Security`，导致有效签名被误判为无效。
+- **旧 CC Switch 卸载入口**：Windows 优先启动扫描到的旧 CC Switch 卸载程序或卸载快捷方式，仅在没有可靠入口时回退到系统应用卸载页面。
+
 ## [3.20.3] - 2026-09-04
 
 ### Improved

@@ -204,6 +204,11 @@ export function AgentInstallPanel({
     }
   };
 
+  const legacyUninstallLabel =
+    legacyStatus?.uninstall_paths && legacyStatus.uninstall_paths.length > 0
+      ? "启动旧卸载器 / Run legacy uninstaller"
+      : "打开系统卸载页 / Open uninstall settings";
+
   const installMissing = async () => {
     const candidates = agents.filter(
       (agent) => agent.supported && !agent.installed && agent.command,
@@ -375,7 +380,7 @@ export function AgentInstallPanel({
                 disabled={legacyBusy}
               >
                 <ExternalLink className="mr-2 h-4 w-4" />
-                打开卸载入口 / Uninstall settings
+                {legacyUninstallLabel}
               </Button>
             </div>
             {legacyStatus?.sql_exports &&
@@ -430,6 +435,9 @@ export function AgentInstallPanel({
                 </div>
                 {legacyStatus.install_paths.map((path) => (
                   <div key={path}>检测到旧程序 / Legacy app: {path}</div>
+                ))}
+                {legacyStatus.uninstall_paths?.map((path) => (
+                  <div key={path}>检测到卸载入口 / Uninstaller: {path}</div>
                 ))}
                 <div>
                   请先退出旧 CC Switch，迁移后再卸载；两个程序同时运行会争用

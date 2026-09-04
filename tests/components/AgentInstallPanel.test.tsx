@@ -496,6 +496,9 @@ describe("AgentInstallPanel", () => {
       skills_dir: null,
       backups_dir: "C:\\Users\\Test\\.cc-switch\\backups",
       install_paths: [],
+      uninstall_paths: [
+        "C:\\Users\\Test\\AppData\\Local\\Programs\\CC Switch\\uninstall.exe",
+      ],
       sql_exports: [
         {
           path: "C:\\Users\\Test\\Downloads\\cc-switch-latest.sql",
@@ -519,6 +522,9 @@ describe("AgentInstallPanel", () => {
     );
     expect(
       screen.getByRole("button", { name: /手动选择.*SQL/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /启动旧卸载器/ }),
     ).toBeInTheDocument();
   });
 });

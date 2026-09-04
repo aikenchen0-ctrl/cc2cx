@@ -9,6 +9,7 @@ export interface LegacyCcSwitchStatus {
   backups_dir: string | null;
   install_paths: string[];
   sql_exports?: LegacySqlExportCandidate[];
+  uninstall_paths?: string[];
 }
 
 export interface LegacySqlExportCandidate {

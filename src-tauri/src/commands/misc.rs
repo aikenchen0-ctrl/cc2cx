@@ -290,6 +290,7 @@ pub struct LegacyCcSwitchStatus {
     backups_dir: Option<String>,
     install_paths: Vec<String>,
     sql_exports: Vec<LegacySqlExportCandidate>,
+    uninstall_paths: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -367,6 +368,67 @@ fn discover_legacy_sql_exports(
     candidates
 }
 
+#[cfg(target_os = "windows")]
+fn legacy_cc_switch_uninstall_candidates(home: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in [
+        home.join("AppData\\Local\\Programs\\CC Switch"),
+        home.join("AppData\\Local\\CC Switch"),
+        home.join("AppData\\Local\\Programs\\速启AI"),
+        home.join("AppData\\Local\\速启AI"),
+    ] {
+        for name in [
+            "uninstall.exe",
+            "Uninstall CC Switch.exe",
+            "卸载 CC Switch.exe",
+        ] {
+            let path = root.join(name);
+            if path.is_file() {
+                candidates.push(path);
+            }
+        }
+    }
+    let start_menu = home.join("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs");
+    let desktop = home.join("Desktop");
+    let mut directories = vec![(start_menu, 0_u8), (desktop, 0_u8)];
+    while let Some((directory, depth)) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && depth < 2 {
+                directories.push((path, depth + 1));
+                continue;
+            }
+            let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !extension.eq_ignore_ascii_case("lnk") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if (name.contains("cc switch") || name.contains("速启ai"))
+                && (name.contains("uninstall") || name.contains("卸载"))
+            {
+                candidates.push(path);
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+#[cfg(not(target_os = "windows"))]
+fn legacy_cc_switch_uninstall_candidates(_home: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
     let data_dir = home.join(".cc-switch");
     let database_path = data_dir.join("cc-switch.db");
@@ -398,11 +460,17 @@ fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
         }
     }
 
+    let uninstall_candidates = legacy_cc_switch_uninstall_candidates(home);
     let detected = database_path.is_file()
         || config_path.is_file()
         || skills_dir.is_dir()
         || backups_dir.is_dir()
-        || !install_paths.is_empty();
+        || !install_paths.is_empty()
+        || !uninstall_candidates.is_empty();
+    let uninstall_paths = uninstall_candidates
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
     LegacyCcSwitchStatus {
         detected,
         data_dir: data_dir
@@ -422,6 +490,7 @@ fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
             .then(|| backups_dir.to_string_lossy().into_owned()),
         install_paths,
         sql_exports: discover_legacy_sql_exports(home, &data_dir, &backups_dir),
+        uninstall_paths,
     }
 }
 
@@ -883,7 +952,17 @@ fn windows_signer_subject_is_trusted(subject: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn verify_windows_authenticode(path: &Path) -> Result<(), String> {
     let script = r#"$ErrorActionPreference='Stop'; $signature=Get-AuthenticodeSignature -LiteralPath $env:CC_LAUNCH_INSTALLER_PATH; if($signature.Status -ne 'Valid'){ throw ('Authenticode status: ' + $signature.Status) }; Write-Output ([string]$signature.SignerCertificate.Subject)"#;
-    let mut command = std::process::Command::new("powershell");
+    let powershell = std::env::var_os("WINDIR")
+        .map(|windir| {
+            PathBuf::from(windir)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    let mut command = std::process::Command::new(powershell);
     command
         .args([
             "-NoProfile",
@@ -2051,6 +2130,25 @@ pub async fn detect_legacy_cc_switch() -> Result<LegacyCcSwitchStatus, String> {
 pub async fn open_legacy_cc_switch_uninstall(app: AppHandle) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
+        if let Some(path) = legacy_cc_switch_uninstall_candidates(&crate::config::get_home_dir())
+            .into_iter()
+            .next()
+        {
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+            {
+                app.opener()
+                    .open_path(path.to_string_lossy().to_string(), None::<String>)
+                    .map_err(|error| format!("启动旧 CC Switch 卸载快捷方式失败: {error}"))?;
+            } else {
+                std::process::Command::new(path)
+                    .spawn()
+                    .map_err(|error| format!("启动旧 CC Switch 卸载程序失败: {error}"))?;
+            }
+            return Ok(true);
+        }
         app.opener()
             .open_url("ms-settings:appsfeatures", None::<String>)
             .map_err(|error| format!("打开 Windows 应用卸载页面失败: {error}"))?;
