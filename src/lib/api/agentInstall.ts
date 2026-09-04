@@ -23,6 +23,7 @@ export interface AgentInstallStatus {
   supported: boolean;
   unsupported_reason: string | null;
   command: string | null;
+  install_path?: string | null;
   dependencies: AgentInstallDependency[];
 }
 

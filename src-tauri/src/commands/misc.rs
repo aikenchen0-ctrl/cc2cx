@@ -251,6 +251,7 @@ pub struct AgentInstallStatus {
     supported: bool,
     unsupported_reason: Option<String>,
     command: Option<String>,
+    install_path: Option<String>,
     dependencies: Vec<AgentInstallDependency>,
 }
 
@@ -321,6 +322,7 @@ struct DesktopAgentStatus {
     runnable: bool,
     version: Option<String>,
     error: Option<String>,
+    install_path: Option<PathBuf>,
 }
 
 fn command_exists(command: &str) -> bool {
@@ -884,16 +886,43 @@ fn windows_app_package_installed(_agent_id: &str) -> bool {
     false
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_complete_macos_app_bundle(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let contents = path.join("Contents");
+    if !contents.join("Info.plist").is_file() {
+        return false;
+    }
+    let macos_dir = contents.join("MacOS");
+    std::fs::read_dir(macos_dir)
+        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+        .unwrap_or(false)
+}
+
+fn desktop_agent_path(agent_id: &str) -> Option<PathBuf> {
+    desktop_agent_candidates(agent_id).into_iter().find(|path| {
+        #[cfg(target_os = "macos")]
+        {
+            is_complete_macos_app_bundle(path)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            path.is_file() || path.is_dir()
+        }
+    })
+}
+
 fn desktop_agent_status(agent_id: &str) -> DesktopAgentStatus {
-    let path_found = desktop_agent_candidates(agent_id)
-        .into_iter()
-        .any(|path| path.is_file() || path.is_dir());
-    let installed = path_found || windows_app_package_installed(agent_id);
+    let install_path = desktop_agent_path(agent_id);
+    let installed = install_path.is_some() || windows_app_package_installed(agent_id);
     DesktopAgentStatus {
         installed,
         runnable: installed,
         version: None,
         error: None,
+        install_path,
     }
 }
 
@@ -1182,7 +1211,7 @@ async fn install_workbuddy_archive(archive_path: PathBuf) -> Result<(), String> 
 }
 
 #[cfg(target_os = "macos")]
-async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Result<(), String> {
+async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Result<PathBuf, String> {
     let app_bundle = app_bundle.to_string();
     tokio::task::spawn_blocking(move || {
         let extract_dir = std::env::temp_dir().join(format!(
@@ -1209,26 +1238,59 @@ async fn install_macos_zip_app(archive_path: PathBuf, app_bundle: &str) -> Resul
 
         let source = find_app_bundle(&extract_dir, &app_bundle)
             .ok_or_else(|| format!("安装包中未找到 {app_bundle}"))?;
+        let mut application_dirs = vec![PathBuf::from("/Applications")];
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .map_err(|_| "无法确定当前用户目录".to_string())?;
-        let applications = home.join("Applications");
-        std::fs::create_dir_all(&applications)
-            .map_err(|error| format!("创建用户应用目录失败: {error}"))?;
-        let destination = applications.join(&app_bundle);
-        let copy_status = std::process::Command::new("ditto")
-            .arg(&source)
-            .arg(&destination)
-            .status()
-            .map_err(|error| format!("安装 {app_bundle} 失败: {error}"))?;
-        let _ = std::fs::remove_dir_all(&extract_dir);
-        if !copy_status.success() {
-            return Err(format!(
-                "复制 {app_bundle} 退出，状态码: {:?}",
-                copy_status.code()
-            ));
+        application_dirs.push(home.join("Applications"));
+
+        let mut errors = Vec::new();
+        for applications in application_dirs {
+            if let Err(error) = std::fs::create_dir_all(&applications) {
+                errors.push(format!("{}：{error}", applications.display()));
+                continue;
+            }
+            let destination = applications.join(&app_bundle);
+            let _ = std::fs::remove_dir_all(&destination);
+            let copy_result = std::process::Command::new("ditto")
+                .arg(&source)
+                .arg(&destination)
+                .output()
+                .map_err(|error| format!("启动 ditto 失败：{error}"));
+            match copy_result {
+                Ok(output) if output.status.success() => {
+                    if is_complete_macos_app_bundle(&destination) {
+                        let _ = std::fs::remove_dir_all(&extract_dir);
+                        return Ok(destination);
+                    }
+                    errors.push(format!(
+                        "{}：复制命令成功但应用包内容不完整",
+                        destination.display()
+                    ));
+                    let _ = std::fs::remove_dir_all(&destination);
+                }
+                Ok(output) => {
+                    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    errors.push(format!(
+                        "{}：退出状态 {:?}{}",
+                        destination.display(),
+                        output.status.code(),
+                        if detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!("：{detail}")
+                        }
+                    ));
+                    let _ = std::fs::remove_dir_all(&destination);
+                }
+                Err(error) => errors.push(format!("{}：{error}", destination.display())),
+            }
         }
-        Ok(())
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        Err(format!(
+            "复制 {app_bundle} 失败，已尝试系统和用户应用目录：{}",
+            errors.join("；")
+        ))
     })
     .await
     .map_err(|error| format!("桌面应用安装任务失败: {error}"))?
@@ -1259,16 +1321,13 @@ fn find_app_bundle(root: &Path, bundle_name: &str) -> Option<PathBuf> {
 fn launch_desktop_agent(agent_id: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let name = match agent_id {
-            "codex-ui" => "ChatGPT",
-            "workbuddy" => "WorkBuddy",
-            _ => return Ok(()),
-        };
+        let path = desktop_agent_path(agent_id)
+            .ok_or_else(|| format!("未找到 {agent_id} 的完整应用包"))?;
         std::process::Command::new("open")
-            .args(["-a", name])
+            .arg(path)
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("启动 {name} 失败: {error}"))
+            .map_err(|error| format!("启动 {agent_id} 失败: {error}"))
     }
 
     #[cfg(target_os = "windows")]
@@ -1652,6 +1711,9 @@ pub async fn get_agent_install_statuses() -> Result<Vec<AgentInstallStatus>, Str
                 runnable: status.runnable,
                 version: status.version,
                 error: status.error,
+                install_path: status
+                    .install_path
+                    .map(|path| path.to_string_lossy().into_owned()),
                 supported: spec.supported,
                 unsupported_reason: spec.unsupported_reason.map(str::to_string),
                 command: (!status.installed)
@@ -1670,6 +1732,7 @@ pub async fn get_agent_install_statuses() -> Result<Vec<AgentInstallStatus>, Str
                 runnable: false,
                 version: None,
                 error: None,
+                install_path: None,
                 supported: spec.supported,
                 unsupported_reason: spec.unsupported_reason.map(str::to_string),
                 command: None,
@@ -1687,6 +1750,7 @@ pub async fn get_agent_install_statuses() -> Result<Vec<AgentInstallStatus>, Str
             runnable: version.version.is_some(),
             version: version.version,
             error: version.error,
+            install_path: None,
             supported: spec.supported,
             unsupported_reason: spec.unsupported_reason.map(str::to_string),
             command: (!installed)
@@ -9193,6 +9257,23 @@ mod tests {
 
         assert!(codex_ui.desktop && codex_ui.tool.is_none());
         assert!(workbuddy.desktop && workbuddy.tool.is_none());
+    }
+
+    #[test]
+    fn incomplete_macos_app_bundle_is_not_treated_as_installed() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let app = temp.path().join("ChatGPT.app");
+        std::fs::create_dir_all(&app).expect("create app directory");
+        assert!(!is_complete_macos_app_bundle(&app));
+
+        std::fs::create_dir_all(app.join("Contents").join("MacOS")).expect("create app contents");
+        std::fs::write(app.join("Contents").join("Info.plist"), b"plist").expect("write plist");
+        std::fs::write(
+            app.join("Contents").join("MacOS").join("ChatGPT"),
+            b"binary",
+        )
+        .expect("write executable placeholder");
+        assert!(is_complete_macos_app_bundle(&app));
     }
 
     #[test]

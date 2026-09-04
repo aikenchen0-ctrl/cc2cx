@@ -360,4 +360,26 @@ describe("AgentInstallPanel", () => {
     expect(await screen.findByText("下载文件")).toBeInTheDocument();
     expect(screen.getByText(/1 MB \/ 2 MB/)).toBeInTheDocument();
   });
+
+  it("shows the detected desktop app installation path", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(
+      statuses.map((agent) =>
+        agent.id === "codex-ui"
+          ? {
+              ...agent,
+              installed: true,
+              runnable: true,
+              install_path: "/Applications/ChatGPT.app",
+            }
+          : agent,
+      ),
+    );
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+
+    expect(
+      await screen.findByText("/Applications/ChatGPT.app"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/安装位置/)).toBeInTheDocument();
+  });
 });

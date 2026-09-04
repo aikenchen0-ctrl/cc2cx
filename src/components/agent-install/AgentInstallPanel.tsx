@@ -264,6 +264,14 @@ export function AgentInstallPanel({
                       {agent.description}
                       {agent.version ? ` · ${agent.version}` : ""}
                     </div>
+                    {agent.install_path && (
+                      <div className="mt-1 truncate text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground">
+                          安装位置：
+                        </span>
+                        <span className="font-mono">{agent.install_path}</span>
+                      </div>
+                    )}
                     {agent.dependencies.length > 0 && (
                       <div
                         className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs"
