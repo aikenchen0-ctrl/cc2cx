@@ -15,6 +15,10 @@ import {
 } from "@/lib/api/agentInstall";
 import { settingsApi } from "@/lib/api/settings";
 import { InstallProgressVisual } from "./InstallProgressVisual";
+import {
+  InstallPermissionGuide,
+  isPermissionInstallError,
+} from "./InstallPermissionGuide";
 
 interface InstallConfirmationPanelProps {
   agent: AgentInstallStatus | null;
@@ -143,6 +147,9 @@ export function InstallConfirmationPanel({
               stepIndex={0}
               totalSteps={1}
             />
+          )}
+          {error && isPermissionInstallError(error) && (
+            <InstallPermissionGuide />
           )}
           <section className="space-y-2">
             <h4 className="text-sm font-medium">依赖检查</h4>

@@ -21,6 +21,10 @@ import {
   InstallOnboardingVisual,
   InstallProgressVisual,
 } from "./InstallProgressVisual";
+import {
+  InstallPermissionGuide,
+  isPermissionInstallError,
+} from "./InstallPermissionGuide";
 
 function hasUnfixableBlockingDependency(agent: AgentInstallStatus): boolean {
   return agent.dependencies.some(
@@ -368,6 +372,10 @@ export function AgentInstallPanel({
               ))}
             </div>
           )}
+          {(error || batchMessage) &&
+            isPermissionInstallError(error ?? batchMessage) && (
+              <InstallPermissionGuide />
+            )}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
       </FullScreenPanel>

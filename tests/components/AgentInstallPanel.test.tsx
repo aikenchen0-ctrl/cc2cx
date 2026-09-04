@@ -382,4 +382,25 @@ describe("AgentInstallPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/安装位置/)).toBeInTheDocument();
   });
+
+  it("shows permission guidance when a desktop install is denied", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(agentInstallApi.runInstall).mockRejectedValue(
+      new Error(
+        "复制 ChatGPT.app 失败：/Applications：Operation not permitted",
+      ),
+    );
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "安装 Codex UI" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确定安装" }));
+
+    expect(
+      await screen.findByTestId("agent-install-permission-guide"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/需要应用目录权限/)).toBeInTheDocument();
+    expect(screen.getByText(/共享与权限/)).toBeInTheDocument();
+  });
 });
