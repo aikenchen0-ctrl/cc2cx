@@ -1614,6 +1614,9 @@ pub fn run() {
             commands::probe_tool_installations,
             commands::get_agent_install_statuses,
             commands::run_agent_install,
+            commands::launch_agent,
+            commands::detect_legacy_cc_switch,
+            commands::open_legacy_cc_switch_uninstall,
             commands::ensure_node_runtime,
             // Provider terminal
             commands::open_provider_terminal,

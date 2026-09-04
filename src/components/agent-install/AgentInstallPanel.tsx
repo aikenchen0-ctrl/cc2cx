@@ -16,6 +16,10 @@ import {
   type AgentInstallStatus,
 } from "@/lib/api/agentInstall";
 import { settingsApi } from "@/lib/api/settings";
+import {
+  legacyMigrationApi,
+  type LegacyCcSwitchStatus,
+} from "@/lib/api/legacyMigration";
 import { InstallConfirmationPanel } from "./InstallConfirmationPanel";
 import {
   InstallOnboardingVisual,
@@ -25,6 +29,22 @@ import {
   InstallPermissionGuide,
   isPermissionInstallError,
 } from "./InstallPermissionGuide";
+
+const AGENT_USAGE: Record<string, { command: string; hint: string }> = {
+  "codex-ui": { command: "Codex UI", hint: "打开桌面应用后登录并开始对话" },
+  claude: {
+    command: "claude",
+    hint: "在终端运行 claude 开始 Claude Code 会话",
+  },
+  codex: { command: "codex", hint: "在终端运行 codex 开始 Codex 会话" },
+  opencode: { command: "opencode", hint: "在终端运行 opencode 开始会话" },
+  workbuddy: { command: "WorkBuddy", hint: "打开 WorkBuddy 桌面应用" },
+  gemini: { command: "gemini", hint: "在终端运行 gemini 开始 Gemini CLI 会话" },
+  grokbuild: { command: "grok", hint: "在终端运行 grok 开始 Grok Build 会话" },
+  openclaw: { command: "openclaw", hint: "在终端运行 openclaw 开始会话" },
+  hermes: { command: "hermes", hint: "在终端运行 hermes 开始会话" },
+  pi: { command: "pi", hint: "在终端运行 pi 开始会话" },
+};
 
 function hasUnfixableBlockingDependency(agent: AgentInstallStatus): boolean {
   return agent.dependencies.some(
@@ -60,6 +80,14 @@ export function AgentInstallPanel({
     useState<AgentInstallProgress | null>(null);
   const [batchStep, setBatchStep] = useState({ index: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
+  const [backgroundProgress, setBackgroundProgress] =
+    useState<AgentInstallProgress | null>(null);
+  const [isBackgroundInstalling, setIsBackgroundInstalling] = useState(false);
+  const [legacyStatus, setLegacyStatus] = useState<LegacyCcSwitchStatus | null>(
+    null,
+  );
+  const [legacyBusy, setLegacyBusy] = useState(false);
+  const [legacyMessage, setLegacyMessage] = useState<string | null>(null);
   const load = useCallback(async () => {
     setIsLoading(true);
     setError(null);
@@ -76,17 +104,96 @@ export function AgentInstallPanel({
   }, [isOpen, load]);
 
   useEffect(() => {
-    if (!isOpen) return;
     let unlisten: (() => void) | undefined;
     void agentInstallApi
       .listenProgress((progress) => {
         setInstallProgress(progress);
+        if (isBackgroundInstalling) {
+          setBackgroundProgress(progress);
+        }
       })
       .then((dispose) => {
         unlisten = dispose;
       });
     return () => unlisten?.();
-  }, [isOpen]);
+  }, [isBackgroundInstalling]);
+
+  useEffect(() => {
+    if (!backgroundProgress || backgroundProgress.status === "running") return;
+    const timer = window.setTimeout(() => setBackgroundProgress(null), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [backgroundProgress]);
+
+  const runInBackground = () => {
+    if (!selected) return;
+    const agent = selected;
+    setBackgroundProgress(null);
+    setInstallProgress(null);
+    setIsBackgroundInstalling(true);
+    setSelected(null);
+    void agentInstallApi
+      .runInstall(agent.id)
+      .then(() => load())
+      .finally(() => setIsBackgroundInstalling(false))
+      .catch((reason) => {
+        const message =
+          reason instanceof Error ? reason.message : String(reason);
+        setError(`${agent.name}: ${message}`);
+      });
+  };
+
+  const detectLegacy = async () => {
+    setLegacyBusy(true);
+    setLegacyMessage(null);
+    try {
+      const status = await legacyMigrationApi.detect();
+      setLegacyStatus(status);
+      setLegacyMessage(
+        status.detected
+          ? "已发现旧 CC Switch 痕迹，请先备份再同步。/ Legacy CC Switch data found; back up before syncing."
+          : "未发现旧 CC Switch 安装或数据。/ No legacy CC Switch installation or data found.",
+      );
+    } catch (reason) {
+      setLegacyMessage(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      setLegacyBusy(false);
+    }
+  };
+
+  const importLegacy = async () => {
+    setLegacyBusy(true);
+    setLegacyMessage(null);
+    try {
+      const filePath = await settingsApi.openFileDialog();
+      if (!filePath) return;
+      await settingsApi.importConfigFromFile(filePath);
+      await load();
+      setLegacyMessage(
+        "旧 CC Switch 配置已导入。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Imported successfully. Legacy data was kept; recheck sensitive logins in each Agent.",
+      );
+    } catch (reason) {
+      setLegacyMessage(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      setLegacyBusy(false);
+    }
+  };
+
+  const openLegacyUninstall = async () => {
+    setLegacyBusy(true);
+    try {
+      await legacyMigrationApi.openUninstall();
+    } catch (reason) {
+      setLegacyMessage(
+        reason instanceof Error ? reason.message : String(reason),
+      );
+    } finally {
+      setLegacyBusy(false);
+    }
+  };
 
   const installMissing = async () => {
     const candidates = agents.filter(
@@ -191,8 +298,8 @@ export function AgentInstallPanel({
   return (
     <>
       <FullScreenPanel
-        isOpen={isOpen && !selected}
-        title="安装 Agent"
+        isOpen={isOpen && !selected && !isBackgroundInstalling}
+        title="安装 Agent / Install Agents"
         onClose={onClose}
         footer={
           <Button
@@ -201,15 +308,18 @@ export function AgentInstallPanel({
             disabled={isLoading}
           >
             <RefreshCw className="mr-2 h-4 w-4" />
-            刷新状态
+            刷新状态 / Refresh
           </Button>
         }
       >
         <div className="mx-auto w-full max-w-5xl space-y-4">
           <div>
-            <h3 className="text-base font-semibold">受管理的 Agent</h3>
+            <h3 className="text-base font-semibold">
+              受管理的 Agent / Managed Agents
+            </h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              安装后会立即重新检测命令是否可用。
+              安装后会立即重新检测命令是否可用。/ Status is rechecked after
+              installation.
             </p>
           </div>
           <InstallOnboardingVisual phase={visibleProgress?.phase ?? null} />
@@ -220,6 +330,64 @@ export function AgentInstallPanel({
               totalSteps={batchStep.total || 1}
             />
           )}
+          <section className="space-y-3 border border-border-default px-4 py-3">
+            <div>
+              <h4 className="text-sm font-semibold">
+                CC Switch 迁移 / CC Switch migration
+              </h4>
+              <p className="mt-1 text-xs text-muted-foreground">
+                只读检测旧目录；配置同步使用 SQL
+                导出并自动备份，不会删除旧数据。/ Read-only detection; SQL
+                import creates a backup and never deletes legacy data.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void detectLegacy()}
+                disabled={legacyBusy}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                检测旧 CC Switch / Detect
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => void importLegacy()}
+                disabled={legacyBusy}
+              >
+                <Download className="mr-2 h-4 w-4" />
+                从导出文件同步 / Import export
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void openLegacyUninstall()}
+                disabled={legacyBusy}
+              >
+                <ExternalLink className="mr-2 h-4 w-4" />
+                打开卸载入口 / Uninstall settings
+              </Button>
+            </div>
+            {legacyStatus?.detected && (
+              <div className="space-y-1 text-xs text-amber-600 dark:text-amber-400">
+                <div>
+                  检测到旧数据目录 / Legacy data: {legacyStatus.data_dir}
+                </div>
+                {legacyStatus.install_paths.map((path) => (
+                  <div key={path}>检测到旧程序 / Legacy app: {path}</div>
+                ))}
+                <div>
+                  请先退出旧 CC Switch，迁移后再卸载；两个程序同时运行会争用
+                  Agent 配置。/ Quit legacy CC Switch before syncing; running
+                  both can overwrite Agent configuration.
+                </div>
+              </div>
+            )}
+            {legacyMessage && (
+              <p className="text-xs text-muted-foreground">{legacyMessage}</p>
+            )}
+          </section>
           {agents.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 border border-border-default px-4 py-3">
               <div className="min-w-0 flex-1 text-sm">
@@ -240,7 +408,7 @@ export function AgentInstallPanel({
                 ) : (
                   <Download className="mr-2 h-4 w-4" />
                 )}
-                一键安装缺失 Agent
+                一键安装缺失 Agent / Install Missing
               </Button>
             </div>
           )}
@@ -319,6 +487,32 @@ export function AgentInstallPanel({
                         })}
                       </div>
                     )}
+                    {agent.installed && AGENT_USAGE[agent.id] && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">
+                          使用说明 / How to use：{AGENT_USAGE[agent.id].hint}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label={`打开 ${agent.name}`}
+                          onClick={() =>
+                            void agentInstallApi
+                              .launch(agent.id)
+                              .catch((reason) =>
+                                setError(
+                                  reason instanceof Error
+                                    ? reason.message
+                                    : String(reason),
+                                ),
+                              )
+                          }
+                        >
+                          <ExternalLink className="mr-1 h-3 w-3" />
+                          打开 / Open
+                        </Button>
+                      </div>
+                    )}
                     {!agent.supported && (
                       <div className="mt-1 text-xs text-amber-600 dark:text-amber-400">
                         {agent.unsupported_reason}
@@ -379,10 +573,32 @@ export function AgentInstallPanel({
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
       </FullScreenPanel>
+      {backgroundProgress && !selected && (
+        <div
+          data-testid="agent-install-floating-progress"
+          className="fixed bottom-5 right-5 z-[80] w-80 rounded-xl border border-cyan-400/40 bg-slate-950/95 p-3 text-slate-100 shadow-2xl shadow-cyan-950/30"
+        >
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="truncate">{backgroundProgress.message}</span>
+            <span className="font-mono text-cyan-200">
+              {backgroundProgress.progress == null
+                ? "进行中 / Running"
+                : `${backgroundProgress.progress}%`}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+            <div
+              className="h-full rounded-full bg-cyan-300 transition-all"
+              style={{ width: `${backgroundProgress.progress ?? 38}%` }}
+            />
+          </div>
+        </div>
+      )}
       <InstallConfirmationPanel
         agent={selected}
         onClose={() => setSelected(null)}
         onInstalled={load}
+        onBackgroundInstall={runInBackground}
       />
     </>
   );

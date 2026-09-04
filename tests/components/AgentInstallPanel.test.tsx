@@ -21,6 +21,7 @@ vi.mock("@/lib/api/agentInstall", () => ({
     getStatuses: vi.fn(),
     ensureNodeRuntime: vi.fn(),
     runInstall: vi.fn(),
+    launch: vi.fn(),
     listenOutput: vi.fn().mockResolvedValue(() => undefined),
     listenProgress: vi.fn().mockImplementation(async (handler) => {
       progressHandler = handler;
@@ -118,11 +119,9 @@ describe("AgentInstallPanel", () => {
 
     const onboarding = await screen.findByTestId("agent-install-onboarding");
     expect(onboarding).toBeInTheDocument();
-    expect(within(onboarding).getByText("环境检测")).toBeInTheDocument();
-    expect(within(onboarding).getByText("准备运行时")).toBeInTheDocument();
-    expect(
-      within(onboarding).getByText("安装 Agent", { exact: true }),
-    ).toBeInTheDocument();
+    expect(within(onboarding).getByText(/环境检测/)).toBeInTheDocument();
+    expect(within(onboarding).getByText(/准备运行时/)).toBeInTheDocument();
+    expect(within(onboarding).getByText(/安装 Agent/)).toBeInTheDocument();
   });
 
   it("renders all managed agents and opens an install confirmation before execution", async () => {
@@ -148,7 +147,7 @@ describe("AgentInstallPanel", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Node.js")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "确定安装" }),
+      screen.getByRole("button", { name: /确定安装/ }),
     ).toBeInTheDocument();
     expect(agentInstallApi.runInstall).not.toHaveBeenCalled();
   });
@@ -213,7 +212,7 @@ describe("AgentInstallPanel", () => {
     render(<AgentInstallPanel isOpen onClose={() => undefined} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "一键安装缺失 Agent" }),
+      await screen.findByRole("button", { name: /一键安装缺失 Agent/ }),
     );
     await waitFor(() =>
       expect(agentInstallApi.runInstall).toHaveBeenCalledWith("codex"),
@@ -232,7 +231,7 @@ describe("AgentInstallPanel", () => {
     render(<AgentInstallPanel isOpen onClose={() => undefined} />);
     await screen.findByText("Claude Code");
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    fireEvent.click(screen.getByRole("button", { name: /刷新状态/ }));
     await waitFor(() =>
       expect(agentInstallApi.getStatuses).toHaveBeenCalledTimes(2),
     );
@@ -279,7 +278,7 @@ describe("AgentInstallPanel", () => {
       ).toBeInTheDocument(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "一键安装缺失 Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: /一键安装缺失 Agent/ }));
     await waitFor(() =>
       expect(agentInstallApi.ensureNodeRuntime).toHaveBeenCalled(),
     );
@@ -302,11 +301,11 @@ describe("AgentInstallPanel", () => {
     render(<AgentInstallPanel isOpen onClose={() => undefined} />);
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "一键安装缺失 Agent" }),
+        screen.getByRole("button", { name: /一键安装缺失 Agent/ }),
       ).toBeEnabled(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "一键安装缺失 Agent" }));
+    fireEvent.click(screen.getByRole("button", { name: /一键安装缺失 Agent/ }));
     await waitFor(() => expect(progressHandler).toBeDefined());
 
     act(() => {
@@ -357,7 +356,7 @@ describe("AgentInstallPanel", () => {
       });
     });
 
-    expect(await screen.findByText("下载文件")).toBeInTheDocument();
+    expect(await screen.findByText(/下载文件/)).toBeInTheDocument();
     expect(screen.getByText(/1 MB \/ 2 MB/)).toBeInTheDocument();
   });
 
@@ -395,12 +394,87 @@ describe("AgentInstallPanel", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "安装 Codex UI" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确定安装" }));
+    fireEvent.click(screen.getByRole("button", { name: /确定安装/ }));
 
     expect(
       await screen.findByTestId("agent-install-permission-guide"),
     ).toBeInTheDocument();
     expect(screen.getByText(/需要应用目录权限/)).toBeInTheDocument();
     expect(screen.getByText(/共享与权限/)).toBeInTheDocument();
+  });
+
+  it("shows usage guidance and launches an installed agent", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(
+      statuses.map((agent) =>
+        agent.id === "codex"
+          ? { ...agent, installed: true, runnable: true, command: null }
+          : agent,
+      ),
+    );
+    vi.mocked(agentInstallApi.launch).mockResolvedValue(undefined);
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+
+    await waitFor(() =>
+      expect(screen.getAllByText(/使用说明/).length).toBeGreaterThan(0),
+    );
+    expect(screen.getByText(/在终端运行 codex/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开 Claude Code" }));
+    await waitFor(() => expect(agentInstallApi.launch).toHaveBeenCalled());
+  });
+
+  it("shows usage guidance after an installation completes", async () => {
+    const installedCodexUi = statuses.map((agent) =>
+      agent.id === "codex-ui"
+        ? { ...agent, installed: true, runnable: true, command: null }
+        : agent,
+    );
+    vi.mocked(agentInstallApi.getStatuses)
+      .mockResolvedValueOnce(statuses)
+      .mockResolvedValueOnce(installedCodexUi);
+    vi.mocked(agentInstallApi.runInstall).mockResolvedValue({ success: true });
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /安装 Codex UI/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /确定安装/ }));
+
+    expect(await screen.findByText(/安装完成，如何使用/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /打开 \/ Open/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("moves an installation to the background and keeps a floating progress bar", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(agentInstallApi.runInstall).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "安装 Codex UI" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /后台安装/ }));
+
+    await waitFor(() =>
+      expect(screen.queryByText("安装命令")).not.toBeInTheDocument(),
+    );
+    act(() => {
+      progressHandler?.({
+        agent_id: "codex-ui",
+        phase: "install",
+        stage: "download",
+        status: "running",
+        progress: 35,
+        message: "正在下载 Codex UI",
+      });
+    });
+
+    expect(
+      await screen.findByTestId("agent-install-floating-progress"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("35%")).toBeInTheDocument();
   });
 });

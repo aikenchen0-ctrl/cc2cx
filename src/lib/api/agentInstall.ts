@@ -71,6 +71,8 @@ export const agentInstallApi = {
     invoke("ensure_node_runtime"),
   runInstall: (agentId: string): Promise<{ success: boolean }> =>
     invoke("run_agent_install", { agentId }),
+  launch: (agentId: string): Promise<void> =>
+    invoke("launch_agent", { agentId }).then(() => undefined),
   listenOutput: (handler: (output: AgentInstallOutput) => void) =>
     listen<AgentInstallOutput>("agent-install-output", ({ payload }) =>
       handler(payload),

@@ -5,6 +5,17 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.2] - 2026-09-04
+
+### Added
+
+- **Agent 安装后台模式与双语引导**：安装确认页支持后台安装，关闭确认页后在主窗口显示悬浮进度；安装完成后展示中英双语使用说明并提供一键打开按钮。
+- **CC Switch 迁移入口**：支持只读检测旧 CC Switch 数据目录、导入用户选择的 SQL 导出文件，以及打开平台卸载入口。迁移不会删除旧数据，卸载前需先退出旧程序并完成备份。
+
+### Fixed
+
+- **Windows 启动提示排查说明**：发布说明明确当前包为 Windows x64，未签名包可能触发 SmartScreen 或安全软件提示，并增加快捷方式、WebView2、系统架构和事件查看器排查指引。
+
 ## [3.20.1] - 2026-09-04
 
 ### Fixed

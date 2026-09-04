@@ -18,16 +18,16 @@ import type {
 } from "@/lib/api/agentInstall";
 
 const PHASE_LABELS: Record<AgentInstallPhase, string> = {
-  prepare: "准备环境",
-  install: "正在安装",
-  verify: "验证结果",
-  complete: "安装完成",
+  prepare: "准备环境 / Prepare",
+  install: "正在安装 / Installing",
+  verify: "验证结果 / Verify",
+  complete: "安装完成 / Complete",
 };
 
 const ONBOARDING_STEPS = [
-  { label: "环境检测", icon: ScanSearch },
-  { label: "准备运行时", icon: Cpu },
-  { label: "安装 Agent", icon: Rocket },
+  { label: "环境检测 / Check", icon: ScanSearch },
+  { label: "准备运行时 / Runtime", icon: Cpu },
+  { label: "安装 Agent / Install", icon: Rocket },
 ];
 
 const DETAIL_STAGE_STEPS: Array<{
@@ -35,12 +35,12 @@ const DETAIL_STAGE_STEPS: Array<{
   label: string;
   icon: typeof Cpu;
 }> = [
-  { id: "prepare", label: "环境准备", icon: Cpu },
-  { id: "resolve", label: "解析来源", icon: FileSearch },
-  { id: "download", label: "下载文件", icon: DownloadCloud },
-  { id: "verify", label: "完整性校验", icon: PackageCheck },
-  { id: "install", label: "执行安装", icon: Rocket },
-  { id: "complete", label: "完成检测", icon: Check },
+  { id: "prepare", label: "环境准备 / Prepare", icon: Cpu },
+  { id: "resolve", label: "解析来源 / Resolve", icon: FileSearch },
+  { id: "download", label: "下载文件 / Download", icon: DownloadCloud },
+  { id: "verify", label: "完整性校验 / Verify", icon: PackageCheck },
+  { id: "install", label: "执行安装 / Install", icon: Rocket },
+  { id: "complete", label: "完成检测 / Finish", icon: Check },
 ];
 
 const PHASE_DEFAULT_STAGES: Record<AgentInstallPhase, AgentInstallStage> = {
@@ -277,7 +277,11 @@ export function InstallProgressVisual({
             data-testid="agent-install-progress-detail"
             className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2 font-mono text-[11px] text-slate-300"
           >
-            <span>{progress.unit === "bytes" ? "下载量" : "安装活动"}</span>
+            <span>
+              {progress.unit === "bytes"
+                ? "下载量 / Download"
+                : "安装活动 / Activity"}
+            </span>
             <span className="text-cyan-200">{detail}</span>
           </div>
         )}

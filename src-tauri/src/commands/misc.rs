@@ -281,6 +281,17 @@ pub struct AgentInstallResult {
 }
 
 #[derive(serde::Serialize)]
+pub struct LegacyCcSwitchStatus {
+    detected: bool,
+    data_dir: Option<String>,
+    database_path: Option<String>,
+    config_path: Option<String>,
+    skills_dir: Option<String>,
+    backups_dir: Option<String>,
+    install_paths: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
 pub struct NodeRuntimeStatus {
     available: bool,
     version: Option<String>,
@@ -1870,6 +1881,117 @@ pub async fn run_agent_install(
     .await
     .map_err(|error| format!("agent install task join error: {error}"))??;
     Ok(AgentInstallResult { success: true })
+}
+
+#[tauri::command]
+pub async fn launch_agent(agent_id: String) -> Result<(), String> {
+    let spec = agent_install_specs()
+        .into_iter()
+        .find(|spec| spec.id == agent_id)
+        .ok_or_else(|| format!("Unsupported agent: {agent_id}"))?;
+    if !spec.supported {
+        return Err(spec
+            .unsupported_reason
+            .unwrap_or("此 Agent 暂不支持启动")
+            .to_string());
+    }
+    if spec.desktop {
+        return launch_desktop_agent(&agent_id);
+    }
+    let tool = spec
+        .tool
+        .ok_or_else(|| format!("{agent_id} 没有可用启动命令"))?;
+    launch_terminal_running(tool, &format!("agent_{agent_id}"))
+}
+
+#[tauri::command]
+pub async fn detect_legacy_cc_switch() -> Result<LegacyCcSwitchStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = crate::config::get_home_dir();
+        let data_dir = home.join(".cc-switch");
+        let database_path = data_dir.join("cc-switch.db");
+        let config_path = data_dir.join("config.json");
+        let skills_dir = data_dir.join("skills");
+        let backups_dir = data_dir.join("backups");
+        let mut install_paths = Vec::new();
+
+        #[cfg(target_os = "windows")]
+        {
+            for path in [
+                home.join("AppData\\Local\\Programs\\CC Switch\\CC Switch.exe"),
+                home.join("AppData\\Local\\CC Switch\\CC Switch.exe"),
+            ] {
+                if path.is_file() {
+                    install_paths.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            for path in [
+                PathBuf::from("/Applications/CC Switch.app"),
+                home.join("Applications/CC Switch.app"),
+            ] {
+                if path.is_dir() {
+                    install_paths.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+
+        let detected = database_path.is_file()
+            || config_path.is_file()
+            || skills_dir.is_dir()
+            || backups_dir.is_dir()
+            || !install_paths.is_empty();
+        Ok(LegacyCcSwitchStatus {
+            detected,
+            data_dir: data_dir
+                .is_dir()
+                .then(|| data_dir.to_string_lossy().into_owned()),
+            database_path: database_path
+                .is_file()
+                .then(|| database_path.to_string_lossy().into_owned()),
+            config_path: config_path
+                .is_file()
+                .then(|| config_path.to_string_lossy().into_owned()),
+            skills_dir: skills_dir
+                .is_dir()
+                .then(|| skills_dir.to_string_lossy().into_owned()),
+            backups_dir: backups_dir
+                .is_dir()
+                .then(|| backups_dir.to_string_lossy().into_owned()),
+            install_paths,
+        })
+    })
+    .await
+    .map_err(|error| format!("检测旧 CC Switch 失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn open_legacy_cc_switch_uninstall(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        app.opener()
+            .open_url("ms-settings:appsfeatures", None::<String>)
+            .map_err(|error| format!("打开 Windows 应用卸载页面失败: {error}"))?;
+        return Ok(true);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        app.opener()
+            .open_path("/Applications", None::<String>)
+            .map_err(|error| format!("打开 macOS 应用目录失败: {error}"))?;
+        return Ok(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        app.opener()
+            .open_url("https://github.com/aikenchen0-ctrl/cc2cx", None::<String>)
+            .map_err(|error| format!("打开卸载说明失败: {error}"))?;
+        return Ok(true);
+    }
+    #[allow(unreachable_code)]
+    Err("当前平台不支持打开旧 CC Switch 卸载入口".to_string())
 }
 
 fn emit_agent_install_output(app: &AppHandle, agent_id: &str, stream: &str, line: String) {
