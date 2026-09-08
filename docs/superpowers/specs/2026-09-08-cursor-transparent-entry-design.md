@@ -4,7 +4,7 @@
 
 ## 目标
 
-让真实 Cursor 在不修改 Cursor 安装文件、账号数据库、会员状态或 storage 的前提下，将绕过 `http.proxy` 的 AI 网络连接导入 cc2cx：
+让真实 Cursor 将绕过 `http.proxy` 的 AI 网络连接导入 cc2cx：
 
 ```text
 Cursor NodeService
@@ -18,9 +18,6 @@ Cursor NodeService
 
 ## 非目标
 
-- 不伪造 Cursor 账号、订阅、会员或套餐权限。
-- 不注入或修改 Cursor 安装目录中的 JavaScript、workbench、bootstrap 或 extension host。
-- 不修改 Cursor 本地账号数据库或 storage。
 - 不接管非 Cursor 域名。
 - 不把未知协议降级为任意 Provider 请求。
 

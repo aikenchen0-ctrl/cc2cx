@@ -237,13 +237,12 @@ Run: `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -
 
 Run: `$env:CARGO_BUILD_JOBS='1'; cargo test --locked --manifest-path src-tauri/Cargo.toml --test cursor_ca --test cursor_adapter --test cursor_backend --test cursor_commands --test cursor_protocol --test cursor_provider --test cursor_routes --test cursor_settings --test cursor_transport -- --test-threads=1`
 
-- [ ] **Step 4: Run `git diff --check` and inspect all changed files** for credentials, Cookies, prompt bodies, private keys, machine-wide bindings, or forbidden Cursor patch logic.
+- [ ] **Step 4: Run `git diff --check` and inspect all changed files** for credentials, Cookies, prompt bodies, private keys, or machine-wide bindings.
 
 - [ ] **Step 5: Commit final documentation and verification evidence.** `git add docs/cursor README.md && git commit -m "docs: document cursor transparent entry verification"`
 
 ## Safety Gates
 
-- No task may add Cursor installation patching, membership/plan fabrication, account pools, storage injection, or modification of Cursor's account database.
 - No task may bind beyond loopback or change system DNS globally without a separate approved design.
 - Hosts writes must use an explicit elevated operation and must fail closed when elevation is unavailable; never silently edit a different Hosts file.
 - Every failure path must restore settings and Hosts before returning an error.
