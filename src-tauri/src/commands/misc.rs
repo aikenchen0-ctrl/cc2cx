@@ -2155,15 +2155,36 @@ pub async fn launch_agent(agent_id: String) -> Result<(), String> {
         return launch_agent_with_environment(tool);
     }
     #[cfg(not(target_os = "windows"))]
-    launch_terminal_running(agent_launch_invocation(tool), &format!("agent_{agent_id}"))
+    {
+        let invocation = if tool == "dsh" {
+            deepseek_launch_invocation()
+        } else {
+            tool.to_string()
+        };
+        launch_terminal_running(&invocation, &format!("agent_{agent_id}"))
+    }
 }
 
-fn agent_launch_invocation(tool: &str) -> &str {
-    if tool == "dsh" {
-        "dsh --profile cc2cx"
-    } else {
-        tool
-    }
+fn deepseek_launch_invocation() -> String {
+    let fallback = "dsh --profile cc2cx";
+    let path = build_tool_search_paths("dsh")
+        .into_iter()
+        .flat_map(|directory| tool_executable_candidates("dsh", &directory))
+        .find(|candidate| candidate.is_file());
+    let Some(path) = path else {
+        return fallback.to_string();
+    };
+    let rendered = {
+        #[cfg(target_os = "windows")]
+        {
+            win_quote_path_for_batch(&path.to_string_lossy())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            shell_single_quote(&path.to_string_lossy())
+        }
+    };
+    format!("{rendered} --profile cc2cx")
 }
 
 #[tauri::command]
@@ -5944,16 +5965,25 @@ fn wsl_unc_path_to_linux(path: &Path) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn launch_agent_with_environment(tool: &str) -> Result<(), String> {
-    let invocation = agent_launch_invocation(tool);
     if let Some(distro) = wsl_distro_for_tool(tool) {
+        let invocation = if tool == "dsh" {
+            "dsh --profile cc2cx".to_string()
+        } else {
+            tool.to_string()
+        };
         let command = format!(
             "wsl.exe -d {} -- bash -lic {}",
             windows_cmd_double_quote_arg(&distro),
-            windows_cmd_double_quote_arg(invocation),
+            windows_cmd_double_quote_arg(&invocation),
         );
         return launch_terminal_running(&command, &format!("agent_{tool}_wsl"));
     }
-    launch_terminal_running(invocation, &format!("agent_{tool}"))
+    let invocation = if tool == "dsh" {
+        deepseek_launch_invocation()
+    } else {
+        tool.to_string()
+    };
+    launch_terminal_running(&invocation, &format!("agent_{tool}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -7498,8 +7528,7 @@ mod tests {
 
     #[test]
     fn deepseek_launch_uses_registered_cc2cx_profile() {
-        assert_eq!(agent_launch_invocation("dsh"), "dsh --profile cc2cx");
-        assert_eq!(agent_launch_invocation("codex"), "codex");
+        assert!(deepseek_launch_invocation().contains("--profile cc2cx"));
     }
 
     #[test]
