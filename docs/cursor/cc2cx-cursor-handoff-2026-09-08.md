@@ -67,6 +67,8 @@ src-tauri/examples/cursor_e2e_lab.rs
 
 ## 2. 已实现能力
 
+Agent 安装面板当前管理 12 个 Agent（含 DeepSeek Harness）。
+
 - CA 材料生成、证书配对校验和当前用户 Root 安装/卸载。
 - Cursor settings 事务备份、代理写入、外部修改检测和恢复。
 - 显式本机 HTTP/HTTPS MITM，默认只处理 Cursor 域名。
@@ -77,6 +79,8 @@ src-tauri/examples/cursor_e2e_lab.rs
 - 本地 `IsConnected`、`AvailableModels`、`GetUsableModels`、`GetServerConfig` 最小响应。
 - 隔离 profile 和真实 Cursor E2E runner，避免修改默认 Cursor profile。
 - `profile::launch_with_proxy` 支持隔离测试时注入代理环境变量、`--proxy-server` 和 `--disable-quic`。
+- Agent 安装面板现已纳入 DeepSeek Harness：固定安装 `@deepseek-ai/dsh@0.1.1-rc.2`，并在 `cc2cx` ACP profile 注册同版本 `@deepseek-ai/dsh-acp`；Node.js/npm 依赖、镜像回退、进度事件和安装后校验复用既有链路。
+- DeepSeek Harness 的 API Key、账号登录和 `.dsh` 凭据仍由用户自行配置，安装器不写入或输出任何凭据。
 
 ## 3. 当前真实测试结论
 
@@ -259,3 +263,17 @@ Get-Content C:\Users\血饮\.cc-launch\logs\cc-launch.log -Tail 300
 - 不要重置、清理或覆盖无关改动。
 - 设计文档提交为 `a6e9743`，实现计划提交为 `403af24`。
 - 后续实现按计划分任务提交，避免把无关前端、依赖升级或旧功能改动混入透明入口提交。
+
+### Agent 安装扩展（2026-09-13）
+
+DeepSeek Harness 相关实现集中在：
+
+```text
+src-tauri/src/commands/misc.rs
+src/components/agent-install/AgentInstallPanel.tsx
+tests/components/AgentInstallPanel.test.tsx
+docs/superpowers/specs/2026-09-13-deepseek-harness-install-design.md
+docs/superpowers/plans/2026-09-13-deepseek-harness-install.md
+```
+
+当前已完成代码级接入和专项测试；尚未执行真实 npm 安装。真实安装前应确认 Node.js 18+ 与 npm 可用，并由用户在安装后单独配置 DeepSeek API Key。

@@ -42,3 +42,11 @@ DeepSeek Harness 使用现有 AgentInstallStatus、AgentInstallOutput 和 AgentI
 - 状态探测能识别 `dsh` 已安装、可运行和版本。
 - 安装失败不会影响其他 Agent 安装。
 - 安装命令和日志不包含 API Key、Cookie 或完整用户提示词。
+
+## 实现状态
+
+- Rust AgentInstallSpec、工具探测、Node.js 依赖、npm 镜像回退和固定版本安装命令已接入。
+- CLI 安装后会注册 `cc2cx` ACP profile；CLI 或 ACP profile 任一不可用时，状态不会显示为已安装。
+- 前端已增加 DeepSeek Harness 使用提示和启动入口，复用现有安装确认与进度流程。
+- 已通过 5 项 DeepSeek Rust 单元测试、`rustfmt --check`（`misc.rs`）和 Debug 构建；真实机器安装尚未执行。
+- 工作区级 `cargo fmt --all --check` 仍受既有 Cursor 文件格式差异影响，全量 Cargo 集成测试则被既有 `cursor_e2e_contract` 未解析导入阻断；两者均未归因于本功能。

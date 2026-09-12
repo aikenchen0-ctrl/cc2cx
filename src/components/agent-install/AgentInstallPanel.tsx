@@ -44,6 +44,10 @@ const AGENT_USAGE: Record<string, { command: string; hint: string }> = {
   openclaw: { command: "openclaw", hint: "在终端运行 openclaw 开始会话" },
   hermes: { command: "hermes", hint: "在终端运行 hermes 开始会话" },
   pi: { command: "pi", hint: "在终端运行 pi 开始会话" },
+  deepseek: {
+    command: "dsh",
+    hint: "在终端运行 dsh，使用 cc2cx ACP profile 开始 DeepSeek 会话",
+  },
 };
 
 function hasUnfixableBlockingDependency(agent: AgentInstallStatus): boolean {

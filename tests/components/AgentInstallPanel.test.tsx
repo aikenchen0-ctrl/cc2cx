@@ -454,6 +454,36 @@ describe("AgentInstallPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows DeepSeek Harness ACP usage guidance when installed", async () => {
+    const deepseek: AgentInstallStatus = {
+      id: "deepseek",
+      name: "DeepSeek Harness",
+      description: "DeepSeek 的 ACP 编程 Agent",
+      installed: true,
+      runnable: true,
+      version: "0.1.1-rc.2",
+      error: null,
+      supported: true,
+      unsupported_reason: null,
+      command: null,
+      dependencies: [],
+    };
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue([deepseek]);
+    vi.mocked(agentInstallApi.launch).mockResolvedValue(undefined);
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+
+    expect(
+      await screen.findByText(/使用 cc2cx ACP profile 开始 DeepSeek 会话/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "打开 DeepSeek Harness" }),
+    );
+    await waitFor(() =>
+      expect(agentInstallApi.launch).toHaveBeenCalledWith("deepseek"),
+    );
+  });
+
   it("moves an installation to the background and keeps a floating progress bar", async () => {
     vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
     vi.mocked(agentInstallApi.runInstall).mockImplementation(

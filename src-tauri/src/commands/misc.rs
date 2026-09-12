@@ -123,7 +123,11 @@ struct AgentInstallSpec {
     unsupported_reason: Option<&'static str>,
 }
 
-fn agent_install_specs() -> [AgentInstallSpec; 11] {
+const DEEPSEEK_HARNESS_VERSION: &str = "0.1.1-rc.2";
+const DEEPSEEK_HARNESS_PACKAGE: &str = "@deepseek-ai/dsh";
+const DEEPSEEK_ACP_PACKAGE: &str = "@deepseek-ai/dsh-acp";
+
+fn agent_install_specs() -> [AgentInstallSpec; 12] {
     [
         AgentInstallSpec {
             id: "codex-ui",
@@ -211,6 +215,15 @@ fn agent_install_specs() -> [AgentInstallSpec; 11] {
             name: "Pi",
             description: "Pi Coding Agent",
             tool: Some("pi"),
+            desktop: false,
+            supported: true,
+            unsupported_reason: None,
+        },
+        AgentInstallSpec {
+            id: "deepseek",
+            name: "DeepSeek Harness",
+            description: "DeepSeek 的 ACP 编程 Agent",
+            tool: Some("dsh"),
             desktop: false,
             supported: true,
             unsupported_reason: None,
@@ -1894,7 +1907,16 @@ fn agent_install_command(tool: &str) -> Result<String, String> {
     let command = if !npm_global_prefix_status().0 {
         #[cfg(target_os = "windows")]
         {
-            npm_install_command_with_user_prefix(tool, &npm_user_prefix_path()).unwrap_or(command)
+            let user_command = npm_install_command_with_user_prefix(tool, &npm_user_prefix_path())
+                .unwrap_or(command);
+            // The command is written to a .bat file. A .cmd npm launcher must
+            // be invoked with `call` or cmd.exe will not return to the same
+            // line to run the chained ACP registration command.
+            if tool == "dsh" {
+                format!("call {user_command}")
+            } else {
+                user_command
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -1922,7 +1944,7 @@ fn agent_install_command(tool: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_agent_install_statuses() -> Result<Vec<AgentInstallStatus>, String> {
-    let mut statuses = Vec::with_capacity(11);
+    let mut statuses = Vec::with_capacity(12);
     let preflight = collect_agent_preflight_context();
     for spec in agent_install_specs() {
         if spec.desktop {
@@ -1965,15 +1987,23 @@ pub async fn get_agent_install_statuses() -> Result<Vec<AgentInstallStatus>, Str
             continue;
         };
         let version = get_single_tool_version_impl(tool, None, None).await;
-        let installed = version.version.is_some() || version.installed_but_broken;
+        let cli_installed = version.version.is_some() || version.installed_but_broken;
+        let acp_ready = tool != "dsh" || deepseek_acp_profile_ready();
+        let installed = cli_installed && acp_ready;
+        let runnable = version.version.is_some() && acp_ready;
+        let error = if cli_installed && !acp_ready {
+            Some("dsh 已安装，但 cc2cx ACP profile 尚未注册".to_string())
+        } else {
+            version.error
+        };
         statuses.push(AgentInstallStatus {
             id: spec.id.to_string(),
             name: spec.name.to_string(),
             description: spec.description.to_string(),
             installed,
-            runnable: version.version.is_some(),
+            runnable,
             version: version.version,
-            error: version.error,
+            error,
             install_path: None,
             supported: spec.supported,
             unsupported_reason: spec.unsupported_reason.map(str::to_string),
@@ -2068,7 +2098,7 @@ pub async fn run_agent_install(
         emit_agent_install_progress(&app, &agent_id, "prepare", "error", None, &error);
         return Err(error);
     }
-    if matches!(tool, "codex" | "claude" | "opencode")
+    if matches!(tool, "codex" | "claude" | "opencode" | "dsh")
         && !node_runtime_meets_requirement().is_some()
     {
         let runtime = ensure_node_runtime(app.clone()).await?;
@@ -2088,11 +2118,17 @@ pub async fn run_agent_install(
         "官方 npm 源失败时将依次尝试 npmmirror 与华为云镜像",
     );
     let event_agent_id = agent_id.clone();
+    let install_app = app.clone();
     tokio::task::spawn_blocking(move || {
-        run_agent_install_with_output(&app, &event_agent_id, &command)
+        run_agent_install_with_output(&install_app, &event_agent_id, &command)
     })
     .await
     .map_err(|error| format!("agent install task join error: {error}"))??;
+    if agent_id == "deepseek" && !deepseek_acp_profile_ready() {
+        let error = "DeepSeek Harness CLI 已安装，但 cc2cx ACP profile 注册未完成".to_string();
+        emit_agent_install_progress(&app, &agent_id, "verify", "error", None, &error);
+        return Err(error);
+    }
     Ok(AgentInstallResult { success: true })
 }
 
@@ -2419,7 +2455,11 @@ fn run_agent_install_with_output_inner(
 
 fn merged_node_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
-    let node_dirs = node_runtime_bin_dirs();
+    let mut node_dirs = node_runtime_bin_dirs();
+    // npm --prefix installs command shims directly into this directory. Keep
+    // it in the install subprocess PATH so chained post-install commands (for
+    // example `dsh plugin`) resolve the binary they just installed.
+    push_unique_path(&mut node_dirs, npm_user_bin_dir());
     if node_dirs.is_empty() {
         return current;
     }
@@ -2440,8 +2480,8 @@ fn merged_node_path() -> String {
     }
 }
 
-const VALID_TOOLS: [&str; 8] = [
-    "claude", "codex", "gemini", "grok", "opencode", "openclaw", "hermes", "pi",
+const VALID_TOOLS: [&str; 9] = [
+    "claude", "codex", "gemini", "grok", "opencode", "openclaw", "hermes", "pi", "dsh",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2763,6 +2803,7 @@ fn tool_display_name(tool: &str) -> &'static str {
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
         "pi" => "Pi",
+        "dsh" => "DeepSeek Harness",
         _ => "Unknown",
     }
 }
@@ -2844,6 +2885,7 @@ fn npm_install_command_for(tool: &str) -> Option<&'static str> {
         "opencode" => Some("npm i -g opencode-ai@latest"),
         "openclaw" => Some("npm i -g openclaw@latest"),
         "pi" => Some("npm i -g @earendil-works/pi-coding-agent@latest"),
+        "dsh" => Some("npm i -g @deepseek-ai/dsh@0.1.1-rc.2"),
         _ => None,
     }
 }
@@ -2997,6 +3039,19 @@ fn tool_action_shell_command_for_shell(
     action: ToolLifecycleAction,
     shell: LifecycleCommandShell,
 ) -> Option<String> {
+    if tool == "dsh" && matches!(action, ToolLifecycleAction::Install) {
+        let cli_install = npm_install_command_with_registry_fallback(tool, shell)?;
+        let plugin = match shell {
+            LifecycleCommandShell::Posix => format!(
+                "dsh plugin --profile cc2cx add \"{DEEPSEEK_ACP_PACKAGE}@{DEEPSEEK_HARNESS_VERSION}\""
+            ),
+            LifecycleCommandShell::WindowsBatch => format!(
+                "call dsh plugin --profile cc2cx add \"{DEEPSEEK_ACP_PACKAGE}@{DEEPSEEK_HARNESS_VERSION}\""
+            ),
+        };
+        return Some(format!("{cli_install} && {plugin}"));
+    }
+
     // xAI's primary Windows distribution is the native PowerShell installer.
     // Keep npm as the network/policy fallback, matching the POSIX installer chain.
     #[cfg(target_os = "windows")]
@@ -3269,6 +3324,7 @@ async fn get_single_tool_version_impl(
         "pi" => {
             fetch_npm_latest_for_tool(&client, "@earendil-works/pi-coding-agent", tool, local).await
         }
+        "dsh" => fetch_npm_latest_for_tool(&client, DEEPSEEK_HARNESS_PACKAGE, tool, local).await,
         _ => None,
     };
 
@@ -4941,8 +4997,47 @@ fn npm_package_for(tool: &str) -> Option<&'static str> {
         "opencode" => Some("opencode-ai"),
         "openclaw" => Some("openclaw"),
         "pi" => Some("@earendil-works/pi-coding-agent"),
+        "dsh" => Some(DEEPSEEK_HARNESS_PACKAGE),
         _ => None,
     }
+}
+
+fn deepseek_acp_profile_ready() -> bool {
+    let root = std::env::var_os("DSH_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".dsh")));
+    root.as_deref()
+        .map(deepseek_acp_profile_ready_at)
+        .unwrap_or(false)
+}
+
+fn deepseek_acp_profile_ready_at(root: &Path) -> bool {
+    let profile = root.join("profiles").join("cc2cx");
+    let path = profile.join("package.json");
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    let manifest_version_ok = ["dependencies", "devDependencies", "optionalDependencies"]
+        .iter()
+        .filter_map(|section| value.get(*section))
+        .filter_map(serde_json::Value::as_object)
+        .any(|packages| {
+            packages
+                .get(DEEPSEEK_ACP_PACKAGE)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|version| version.contains(DEEPSEEK_HARNESS_VERSION))
+        });
+    manifest_version_ok
+        && profile
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh-acp")
+            .join("package.json")
+            .is_file()
 }
 
 /// 取路径的父目录(纯字符串截断,不碰 fs):`/a/b/npm` → `/a/b`、`C:\a\b\npm.cmd`
@@ -7348,6 +7443,93 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_harness_is_a_supported_node_agent() {
+        let spec = agent_install_specs()
+            .into_iter()
+            .find(|spec| spec.id == "deepseek")
+            .expect("DeepSeek Harness must be listed");
+        assert_eq!(spec.tool, Some("dsh"));
+        assert!(spec.supported && !spec.desktop);
+    }
+
+    #[test]
+    fn deepseek_harness_install_command_contains_pinned_cli_and_acp_packages() {
+        let command = agent_install_command("dsh").expect("dsh install command");
+        assert!(command.contains("@deepseek-ai/dsh@0.1.1-rc.2"));
+        assert!(command.contains("@deepseek-ai/dsh-acp@0.1.1-rc.2"));
+        assert!(command.contains("plugin --profile cc2cx add"));
+    }
+
+    #[test]
+    fn deepseek_acp_registration_is_chained_after_cli_install() {
+        let command = tool_action_shell_command_for_shell(
+            "dsh",
+            ToolLifecycleAction::Install,
+            LifecycleCommandShell::Posix,
+        )
+        .expect("DeepSeek install command");
+        assert!(
+            command.find("@deepseek-ai/dsh@").unwrap()
+                < command.find("plugin --profile cc2cx add").unwrap()
+        );
+        assert!(command.contains("@deepseek-ai/dsh-acp@0.1.1-rc.2"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn deepseek_windows_acp_registration_uses_call() {
+        let command = tool_action_shell_command_for_shell(
+            "dsh",
+            ToolLifecycleAction::Install,
+            LifecycleCommandShell::WindowsBatch,
+        )
+        .expect("DeepSeek Windows install command");
+        assert!(command.contains("call dsh plugin --profile cc2cx add"));
+    }
+
+    #[test]
+    fn dsh_is_in_tool_registry_and_uses_node_dependency() {
+        assert!(VALID_TOOLS.contains(&"dsh"));
+        assert_eq!(tool_display_name("dsh"), "DeepSeek Harness");
+        let deps = dependencies_for_agent("dsh", "windows", false, false, true, true, false);
+        assert!(deps
+            .iter()
+            .any(|dep| dep.name == "Node.js" && dep.available));
+    }
+
+    #[test]
+    fn install_path_includes_cc_launch_npm_prefix() {
+        let expected = npm_user_bin_dir();
+        let path = merged_node_path();
+        assert!(
+            std::env::split_paths(std::ffi::OsStr::new(&path)).any(|entry| entry == expected),
+            "merged install PATH must include {}",
+            expected.display()
+        );
+    }
+
+    #[test]
+    fn deepseek_profile_requires_manifest_and_installed_acp_package() {
+        let root = tempfile::tempdir().expect("temporary DSH_HOME");
+        let profile = root.path().join("profiles").join("cc2cx");
+        std::fs::create_dir_all(&profile).expect("create profile");
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"@deepseek-ai/dsh-acp":"0.1.1-rc.2"}}"#,
+        )
+        .expect("write profile manifest");
+        assert!(!deepseek_acp_profile_ready_at(root.path()));
+
+        let package = profile
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh-acp");
+        std::fs::create_dir_all(&package).expect("create ACP package");
+        std::fs::write(package.join("package.json"), "{}").expect("write ACP package");
+        assert!(deepseek_acp_profile_ready_at(root.path()));
+    }
+
+    #[test]
     fn pi_lifecycle_metadata_matches_pinned_distribution() {
         let requested = vec!["unsupported".to_string(), "pi".to_string()];
         assert_eq!(normalize_requested_tools(&requested), vec!["pi"]);
@@ -9493,7 +9675,7 @@ mod tests {
     fn agent_install_specs_cover_every_managed_app_and_manual_desktop_item_is_explicit() {
         let specs = agent_install_specs();
 
-        assert_eq!(specs.len(), 11);
+        assert_eq!(specs.len(), 12);
         let desktop = specs
             .iter()
             .find(|spec| spec.id == "claude-desktop")
