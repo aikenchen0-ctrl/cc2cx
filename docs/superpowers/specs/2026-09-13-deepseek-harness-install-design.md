@@ -49,4 +49,4 @@ DeepSeek Harness 使用现有 AgentInstallStatus、AgentInstallOutput 和 AgentI
 - CLI 安装后会注册 `cc2cx` ACP profile；CLI 或 ACP profile 任一不可用时，状态不会显示为已安装。
 - 前端已增加 DeepSeek Harness 使用提示和启动入口，复用现有安装确认与进度流程。
 - 已通过 5 项 DeepSeek Rust 单元测试、`rustfmt --check`（`misc.rs`）和 Debug 构建；真实机器安装尚未执行。
-- 工作区级 `cargo fmt --all --check` 仍受既有 Cursor 文件格式差异影响；全量 Cargo 测试在本机因 Windows 页面文件不足（`os error 1455`）中止，随后出现连锁 rustc ICE，均未归因于本功能。
+- 工作区级 `cargo fmt --all --check` 仍受既有 Cursor 文件格式差异影响；单线程全量 Cargo 测试完成 `2723 passed / 3 failed`，失败项是两项 Windows 符号链接特权错误和一项既有技能迁移断言，均未归因于本功能。
