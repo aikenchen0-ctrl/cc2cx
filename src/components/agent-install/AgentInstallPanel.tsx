@@ -45,8 +45,8 @@ const AGENT_USAGE: Record<string, { command: string; hint: string }> = {
   hermes: { command: "hermes", hint: "在终端运行 hermes 开始会话" },
   pi: { command: "pi", hint: "在终端运行 pi 开始会话" },
   deepseek: {
-    command: "dsh",
-    hint: "在终端运行 dsh，使用 cc2cx ACP profile 开始 DeepSeek 会话",
+    command: "dsh --profile cc2cx",
+    hint: "在终端运行 dsh --profile cc2cx 开始 DeepSeek 会话",
   },
 };
 

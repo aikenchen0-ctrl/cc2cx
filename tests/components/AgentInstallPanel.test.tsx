@@ -474,7 +474,7 @@ describe("AgentInstallPanel", () => {
     render(<AgentInstallPanel isOpen onClose={() => undefined} />);
 
     expect(
-      await screen.findByText(/使用 cc2cx ACP profile 开始 DeepSeek 会话/),
+      await screen.findByText(/dsh --profile cc2cx 开始 DeepSeek 会话/),
     ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "打开 DeepSeek Harness" }),

@@ -2155,7 +2155,15 @@ pub async fn launch_agent(agent_id: String) -> Result<(), String> {
         return launch_agent_with_environment(tool);
     }
     #[cfg(not(target_os = "windows"))]
-    launch_terminal_running(tool, &format!("agent_{agent_id}"))
+    launch_terminal_running(agent_launch_invocation(tool), &format!("agent_{agent_id}"))
+}
+
+fn agent_launch_invocation(tool: &str) -> &str {
+    if tool == "dsh" {
+        "dsh --profile cc2cx"
+    } else {
+        tool
+    }
 }
 
 #[tauri::command]
@@ -5936,15 +5944,16 @@ fn wsl_unc_path_to_linux(path: &Path) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn launch_agent_with_environment(tool: &str) -> Result<(), String> {
+    let invocation = agent_launch_invocation(tool);
     if let Some(distro) = wsl_distro_for_tool(tool) {
         let command = format!(
             "wsl.exe -d {} -- bash -lic {}",
             windows_cmd_double_quote_arg(&distro),
-            windows_cmd_double_quote_arg(tool),
+            windows_cmd_double_quote_arg(invocation),
         );
         return launch_terminal_running(&command, &format!("agent_{tool}_wsl"));
     }
-    launch_terminal_running(tool, &format!("agent_{tool}"))
+    launch_terminal_running(invocation, &format!("agent_{tool}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -7485,6 +7494,12 @@ mod tests {
         )
         .expect("DeepSeek Windows install command");
         assert!(command.contains("call dsh plugin --profile cc2cx add"));
+    }
+
+    #[test]
+    fn deepseek_launch_uses_registered_cc2cx_profile() {
+        assert_eq!(agent_launch_invocation("dsh"), "dsh --profile cc2cx");
+        assert_eq!(agent_launch_invocation("codex"), "codex");
     }
 
     #[test]
