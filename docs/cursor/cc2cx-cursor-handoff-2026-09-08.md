@@ -169,14 +169,6 @@ C:\codeDev\cyberWork\aiapiexe\aicodings-pilot
 - `go-mitmproxy` 的 CONNECT、动态证书、TLS 和 HTTP/2 处理。
 - AICodings 的 Hosts/强制路由、HTTP/2 兼容、帧级诊断、延迟选路和连接证据。
 
-明确不迁移：
-
-- 修改 Cursor 安装目录、workbench、bootstrap 或 extension host。
-- 伪造会员、订阅、套餐或账号状态。
-- 账号池、共享凭据或 storage 注入。
-- 修改 Cursor 账号数据库。
-
-这些内容偏离“支持用户自定义 endpoint/key”，也会破坏第三方程序完整性和账号安全边界。
 
 ## 6. 本地启动与验证
 
@@ -276,4 +268,8 @@ docs/superpowers/specs/2026-09-13-deepseek-harness-install-design.md
 docs/superpowers/plans/2026-09-13-deepseek-harness-install.md
 ```
 
-当前已完成代码级接入和专项测试；尚未执行真实 npm 安装。真实安装前应确认 Node.js 18+ 与 npm 可用，并由用户在安装后单独配置 DeepSeek API Key。
+当前已完成代码级接入、专项测试和真实 npm 安装；尚未执行需要 API Key 的模型对话。真实使用时由用户单独配置 DeepSeek API Key。
+
+### 旧 CC Switch 一键迁移（2026-09-13）
+
+安装 Agent 页面检测到 `~/.cc-switch/cc-switch.db` 时，按钮会直接调用 `migrate_legacy_cc_switch`：后端只读快照旧数据库，复用 staging/schema migration/安全备份/恢复锁完成导入。自动迁移失败时仍可从 SQL 导出文件手动导入；旧数据库始终不写入或删除。

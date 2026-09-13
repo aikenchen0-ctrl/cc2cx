@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ConfigTransferResult } from "./settings";
 
 export interface LegacyCcSwitchStatus {
   detected: boolean;
@@ -21,7 +22,8 @@ export interface LegacySqlExportCandidate {
 export const legacyMigrationApi = {
   detect: (): Promise<LegacyCcSwitchStatus> =>
     invoke("detect_legacy_cc_switch"),
-  migrate: (): Promise<unknown> => invoke("migrate_legacy_cc_switch"),
+  migrate: (): Promise<ConfigTransferResult> =>
+    invoke("migrate_legacy_cc_switch"),
   openUninstall: (): Promise<void> =>
     invoke("open_legacy_cc_switch_uninstall").then(() => undefined),
 };

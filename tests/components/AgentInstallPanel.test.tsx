@@ -573,7 +573,10 @@ describe("AgentInstallPanel", () => {
       uninstall_paths: [],
       sql_exports: [],
     });
-    vi.mocked(legacyMigrationApi.migrate).mockResolvedValue({ success: true });
+    vi.mocked(legacyMigrationApi.migrate).mockResolvedValue({
+      success: true,
+      message: "migrated",
+    });
     const openFileDialog = vi
       .spyOn(settingsApi, "openFileDialog")
       .mockResolvedValue(null);
