@@ -48,5 +48,14 @@ DeepSeek Harness 使用现有 AgentInstallStatus、AgentInstallOutput 和 AgentI
 - Rust AgentInstallSpec、工具探测、Node.js 依赖、npm 镜像回退和固定版本安装命令已接入。
 - CLI 安装后会注册 `cc2cx` ACP profile；CLI 或 ACP profile 任一不可用时，状态不会显示为已安装。
 - 前端已增加 DeepSeek Harness 使用提示和启动入口，复用现有安装确认与进度流程。
-- 已通过 5 项 DeepSeek Rust 单元测试、`rustfmt --check`（`misc.rs`）和 Debug 构建；真实机器安装尚未执行。
+- 已通过 6 项 DeepSeek Rust 单元测试、`rustfmt --check`（`misc.rs`）和 Debug 构建；真实机器安装已完成，模型对话尚未执行。
 - 工作区级 `cargo fmt --all --check` 仍受既有 Cursor 文件格式差异影响；单线程全量 Cargo 测试完成 `2723 passed / 3 failed`，失败项是两项 Windows 符号链接特权错误和一项既有技能迁移断言，均未归因于本功能。
+
+## 真实安装验证（2026-09-13）
+
+- Node.js `v24.15.0` 与 npm `11.12.1` 可用。
+- `npm install --global @deepseek-ai/dsh@0.1.1-rc.2` 成功，`dsh --version` 返回 `0.1.1-rc.2`。
+- `dsh plugin --profile cc2cx add "@deepseek-ai/dsh-acp@0.1.1-rc.2"` 成功；`dsh plugin --profile cc2cx list` 显示 ACP 插件版本为 `0.1.1-rc.2`。
+- `~/.dsh/profiles/cc2cx/package.json` 与实际 `node_modules/@deepseek-ai/dsh-acp/package.json` 均存在，符合安装器的双重就绪校验。
+- `dsh --profile cc2cx --help` 会进入 profile 运行态而非快速退出；探针已主动终止，未修改凭据，也未留下 DeepSeek 进程。
+- 尚未执行需要 DeepSeek API Key 的真实模型对话；API Key 仍由用户单独配置。
