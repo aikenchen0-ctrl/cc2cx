@@ -8,7 +8,7 @@ use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -114,6 +114,32 @@ pub struct BackupEntry {
 }
 
 impl Database {
+    /// Import the legacy CC Switch SQLite database through a read-only snapshot.
+    /// The source file is never written; the existing staged SQL importer then
+    /// performs schema validation, migration, backup, and atomic replacement.
+    pub(crate) fn import_legacy_database(&self, source_path: &Path) -> Result<String, AppError> {
+        if !source_path.is_file() {
+            return Err(AppError::InvalidInput(format!(
+                "旧 CC Switch 数据库不存在: {}",
+                source_path.display()
+            )));
+        }
+        let source_conn = Connection::open_with_flags(
+            source_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| AppError::Database(format!("打开旧 CC Switch 数据库失败: {e}")))?;
+        let mut snapshot = Connection::open_in_memory()
+            .map_err(|e| AppError::Database(format!("创建旧数据库快照失败: {e}")))?;
+        let backup = Backup::new(&source_conn, &mut snapshot)
+            .map_err(|e| AppError::Database(format!("读取旧数据库快照失败: {e}")))?;
+        Self::complete_backup(&backup, "读取旧数据库快照")?;
+        drop(backup);
+
+        let sql = Self::dump_sql(&snapshot, &[])?;
+        self.import_sql_string_inner(&sql, SYNC_PRESERVE_TABLES)
+    }
+
     /// 导出为 SQLite 兼容的 SQL 文本（内存字符串，完整导出）
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
@@ -1487,6 +1513,45 @@ mod tests {
             |row| row.get(0),
         )?;
         assert!(request_exists, "文件 API 必须完整恢复导出数据");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_sqlite_snapshot_imports_without_mutating_source() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let source = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('legacy-provider', 'claude', 'Legacy Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        let source_sql = source.export_sql_string()?;
+        let source_path = _test_home.temp_dir.path().join(".cc-switch/cc-switch.db");
+        std::fs::create_dir_all(source_path.parent().expect("legacy parent"))
+            .expect("create legacy parent");
+        let source_conn = Connection::open(&source_path)?;
+        source_conn.execute_batch(&source_sql)?;
+        drop(source_conn);
+        let before = std::fs::read(&source_path).expect("read legacy source");
+
+        let target = Database::memory()?;
+        target.import_legacy_database(&source_path)?;
+
+        let conn = crate::database::lock_conn!(target.conn);
+        let provider: String = conn.query_row(
+            "SELECT id FROM providers WHERE id = 'legacy-provider'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(provider, "legacy-provider");
+        assert_eq!(
+            std::fs::read(&source_path).expect("read legacy source"),
+            before
+        );
         Ok(())
     }
 

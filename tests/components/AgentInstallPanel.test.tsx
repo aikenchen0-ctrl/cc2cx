@@ -14,6 +14,7 @@ import {
   type AgentInstallProgress,
 } from "@/lib/api/agentInstall";
 import { legacyMigrationApi } from "@/lib/api/legacyMigration";
+import { settingsApi } from "@/lib/api/settings";
 
 let progressHandler: ((progress: AgentInstallProgress) => void) | undefined;
 
@@ -36,6 +37,7 @@ vi.mock("@/lib/api/agentInstall", () => ({
 vi.mock("@/lib/api/legacyMigration", () => ({
   legacyMigrationApi: {
     detect: vi.fn(),
+    migrate: vi.fn(),
     openUninstall: vi.fn(),
   },
 }));
@@ -556,5 +558,35 @@ describe("AgentInstallPanel", () => {
     expect(
       screen.getByRole("button", { name: /启动旧卸载器/ }),
     ).toBeInTheDocument();
+  });
+
+  it("uses automatic database migration when legacy database is detected", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(legacyMigrationApi.detect).mockResolvedValue({
+      detected: true,
+      data_dir: "C:\\Users\\Test\\.cc-switch",
+      database_path: "C:\\Users\\Test\\.cc-switch\\cc-switch.db",
+      config_path: null,
+      skills_dir: null,
+      backups_dir: null,
+      install_paths: [],
+      uninstall_paths: [],
+      sql_exports: [],
+    });
+    vi.mocked(legacyMigrationApi.migrate).mockResolvedValue({ success: true });
+    const openFileDialog = vi
+      .spyOn(settingsApi, "openFileDialog")
+      .mockResolvedValue(null);
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+    const button = await screen.findByRole("button", {
+      name: /一键同步旧配置/,
+    });
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(legacyMigrationApi.migrate).toHaveBeenCalledTimes(1),
+    );
+    expect(openFileDialog).not.toHaveBeenCalled();
   });
 });

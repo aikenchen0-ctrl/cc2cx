@@ -178,13 +178,19 @@ export function AgentInstallPanel({
     setLegacyBusy(true);
     setLegacyMessage(null);
     try {
-      const filePath =
-        selectedLegacySql ?? (await settingsApi.openFileDialog());
-      if (!filePath) return;
-      await settingsApi.importConfigFromFile(filePath);
+      if (legacyStatus?.database_path) {
+        await legacyMigrationApi.migrate();
+      } else {
+        const filePath =
+          selectedLegacySql ?? (await settingsApi.openFileDialog());
+        if (!filePath) return;
+        await settingsApi.importConfigFromFile(filePath);
+      }
       await load();
       setLegacyMessage(
-        "旧 CC Switch 配置已导入。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Imported successfully. Legacy data was kept; recheck sensitive logins in each Agent.",
+        legacyStatus?.database_path
+          ? "旧 CC Switch 配置已自动同步。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Legacy configuration migrated automatically; source data was kept."
+          : "旧 CC Switch 配置已导入。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Imported successfully. Legacy data was kept; recheck sensitive logins in each Agent.",
       );
     } catch (reason) {
       setLegacyMessage(
@@ -354,9 +360,9 @@ export function AgentInstallPanel({
                 CC Switch 迁移 / CC Switch migration
               </h4>
               <p className="mt-1 text-xs text-muted-foreground">
-                只读检测旧目录；配置同步使用 SQL
-                导出并自动备份，不会删除旧数据。/ Read-only detection; SQL
-                import creates a backup and never deletes legacy data.
+                优先从旧数据库自动读取并安全迁移；自动方式失败时可使用 SQL
+                导出，并自动备份，不会删除旧数据。/ Read-only database migration
+                is preferred; SQL import remains as a fallback and creates a backup.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -375,7 +381,9 @@ export function AgentInstallPanel({
                 disabled={legacyBusy}
               >
                 <Download className="mr-2 h-4 w-4" />
-                从导出文件同步 / Import export
+                {legacyStatus?.database_path
+                  ? "一键同步旧配置 / Migrate automatically"
+                  : "从导出文件同步 / Import export"}
               </Button>
               <Button
                 size="sm"

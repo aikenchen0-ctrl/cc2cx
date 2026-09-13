@@ -21,6 +21,7 @@ export interface LegacySqlExportCandidate {
 export const legacyMigrationApi = {
   detect: (): Promise<LegacyCcSwitchStatus> =>
     invoke("detect_legacy_cc_switch"),
+  migrate: (): Promise<unknown> => invoke("migrate_legacy_cc_switch"),
   openUninstall: (): Promise<void> =>
     invoke("open_legacy_cc_switch_uninstall").then(() => undefined),
 };

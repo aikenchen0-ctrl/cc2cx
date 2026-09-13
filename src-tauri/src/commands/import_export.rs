@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
+use crate::commands::misc::legacy_cc_switch_database_path;
 use crate::commands::sync_support::{
     post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
 };
@@ -75,6 +76,28 @@ pub async fn import_config_from_file(
     })
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?
+    .map_err(|e: AppError| e.to_string())
+}
+
+/// Migrate the fixed legacy CC Switch database without requiring a manual SQL export.
+#[tauri::command]
+pub async fn migrate_legacy_cc_switch(state: State<'_, AppState>) -> Result<Value, String> {
+    let app_state_for_sync = state.inner().clone();
+    let source_path = legacy_cc_switch_database_path(&crate::config::get_home_dir());
+    run_with_database_restore_lock(move || {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _skill_state_guard = skill_state_write_guard();
+            let backup_id = app_state_for_sync.db.import_legacy_database(&source_path)?;
+            let warning =
+                post_sync_warning_from_result(Ok(run_post_import_sync(&app_state_for_sync)));
+            if let Some(msg) = warning.as_ref() {
+                log::warn!("[LegacyMigration] post-import sync warning: {msg}");
+            }
+            Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
+        })
+    })
+    .await
+    .map_err(|e| format!("旧 CC Switch 自动迁移失败: {e}"))?
     .map_err(|e: AppError| e.to_string())
 }
 

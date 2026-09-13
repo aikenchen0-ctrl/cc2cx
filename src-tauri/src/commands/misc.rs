@@ -443,8 +443,11 @@ fn legacy_cc_switch_uninstall_candidates(_home: &Path) -> Vec<PathBuf> {
 }
 
 fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
-    let data_dir = home.join(".cc-switch");
-    let database_path = data_dir.join("cc-switch.db");
+    let database_path = legacy_cc_switch_database_path(home);
+    let data_dir = database_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".cc-switch"));
     let config_path = data_dir.join("config.json");
     let skills_dir = data_dir.join("skills");
     let backups_dir = data_dir.join("backups");
@@ -505,6 +508,10 @@ fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
         sql_exports: discover_legacy_sql_exports(home, &data_dir, &backups_dir),
         uninstall_paths,
     }
+}
+
+pub(crate) fn legacy_cc_switch_database_path(home: &Path) -> PathBuf {
+    home.join(".cc-switch").join("cc-switch.db")
 }
 
 #[derive(serde::Serialize)]
@@ -9842,6 +9849,14 @@ mod tests {
             before
         );
         assert!(!data_dir.join("cc-launch.db").exists());
+    }
+
+    #[test]
+    fn legacy_database_path_points_to_legacy_cc_switch_store() {
+        assert_eq!(
+            legacy_cc_switch_database_path(Path::new(r"C:\Users\Test")),
+            PathBuf::from(r"C:\Users\Test\.cc-switch\cc-switch.db")
+        );
     }
 
     #[test]

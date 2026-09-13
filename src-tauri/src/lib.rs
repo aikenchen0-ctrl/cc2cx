@@ -9,6 +9,7 @@ mod codex_history_migration;
 mod codex_state_db;
 mod commands;
 mod config;
+pub mod cursor;
 mod database;
 mod deeplink;
 mod error;
@@ -45,6 +46,7 @@ pub use codex_config::{
 };
 pub use commands::open_provider_terminal;
 pub use commands::*;
+pub use config::get_app_config_dir;
 pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
 pub use database::{Database, Profile};
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
@@ -66,7 +68,7 @@ pub use services::{
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{update_settings, AppSettings};
+pub use settings::{get_effective_current_provider_readonly, update_settings, AppSettings};
 pub use store::AppState;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -1225,6 +1227,10 @@ pub fn run() {
                     }
                 }
 
+                if let Err(e) = state.cursor_harness.recover_stale_settings().await {
+                    log::warn!("恢复 Cursor 上次未完成的 settings 事务失败: {e}");
+                }
+
                 // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
                 // 清干净，否则紧接着的提取会基于被污染的 live 再写一遍。
                 if let Err(e) =
@@ -1486,6 +1492,7 @@ pub fn run() {
             // theirs: config import/export and dialogs
             commands::export_config_to_file,
             commands::import_config_from_file,
+            commands::migrate_legacy_cc_switch,
             commands::webdav_test_connection,
             commands::webdav_sync_upload,
             commands::webdav_sync_download,
@@ -1551,6 +1558,13 @@ pub fn run() {
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
             commands::get_proxy_status,
+            commands::get_cursor_harness_status,
+            commands::initialize_cursor_ca,
+            commands::install_cursor_ca,
+            commands::uninstall_cursor_ca,
+            commands::start_cursor_integration,
+            commands::stop_cursor_integration,
+            commands::configure_cursor_backend,
             commands::get_proxy_config,
             commands::update_proxy_config,
             // Global & Per-App Config
@@ -1879,6 +1893,9 @@ pub fn run() {
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<store::AppState>() {
+        if let Err(e) = state.cursor_harness.stop().await {
+            log::error!("退出时清理 Cursor 接入失败: {e}");
+        }
         let proxy_service = &state.proxy_service;
 
         // 退出时也需要兜底：代理可能已崩溃/未运行，但 Live 接管残留仍在（占位符/备份）。
