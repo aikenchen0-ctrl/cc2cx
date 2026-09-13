@@ -30,3 +30,10 @@
 - 已复用现有 staging、schema 校验、迁移、安全备份和恢复锁。
 - Agent 安装页检测到旧 DB 时直接调用自动迁移；手动 SQL 保留为降级入口。
 - 已通过自动迁移 Rust/前端专项测试；当前 Debug renderer 与 Rust 二进制均已重建。
+
+## 真实旧数据库预检（2026-09-13）
+
+- 旧库 `~/.cc-switch/cc-switch.db` 只读完整性检查返回 `ok`。
+- 旧库 `user_version=16`，当前导入器支持的 schema 版本为 17，属于可迁移范围。
+- 已确认 `providers`、`provider_endpoints`、`mcp_servers`、`prompts`、`skills`、`skill_repos`、`settings` 均存在。
+- 本次仅完成只读预检，未替换当前 cc2cx 数据库；正式迁移需由用户点击“一键同步旧配置”触发。
