@@ -36,4 +36,4 @@
 - 旧库 `~/.cc-switch/cc-switch.db` 只读完整性检查返回 `ok`。
 - 旧库 `user_version=16`，当前导入器支持的 schema 版本为 17，属于可迁移范围。
 - 已确认 `providers`、`provider_endpoints`、`mcp_servers`、`prompts`、`skills`、`skill_repos`、`settings` 均存在。
-- 本次仅完成只读预检，未替换当前 cc2cx 数据库；正式迁移需由用户点击“一键同步旧配置”触发。
+- 已在本机执行一次真实自动迁移：旧库保持不变，当前库完整性检查为 `ok`、版本 17，并生成新的安全备份；后续重复迁移仍应由用户主动点击“一键同步旧配置”触发。
