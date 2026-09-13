@@ -6,6 +6,7 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::misc::legacy_cc_switch_database_path;
+use crate::commands::misc::LEGACY_CC_SWITCH_LAST_MIGRATED_AT_KEY;
 use crate::commands::sync_support::{
     post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
 };
@@ -88,6 +89,13 @@ pub async fn migrate_legacy_cc_switch(state: State<'_, AppState>) -> Result<Valu
         tauri::async_runtime::spawn_blocking(move || {
             let _skill_state_guard = skill_state_write_guard();
             let backup_id = app_state_for_sync.db.import_legacy_database(&source_path)?;
+            let migrated_at = chrono::Utc::now().to_rfc3339();
+            if let Err(error) = app_state_for_sync
+                .db
+                .set_setting(LEGACY_CC_SWITCH_LAST_MIGRATED_AT_KEY, &migrated_at)
+            {
+                log::warn!("[LegacyMigration] failed to persist migration timestamp: {error}");
+            }
             let warning =
                 post_sync_warning_from_result(Ok(run_post_import_sync(&app_state_for_sync)));
             if let Some(msg) = warning.as_ref() {

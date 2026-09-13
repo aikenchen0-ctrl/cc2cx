@@ -11,6 +11,7 @@ export interface LegacyCcSwitchStatus {
   install_paths: string[];
   sql_exports?: LegacySqlExportCandidate[];
   uninstall_paths?: string[];
+  last_migrated_at?: string | null;
 }
 
 export interface LegacySqlExportCandidate {

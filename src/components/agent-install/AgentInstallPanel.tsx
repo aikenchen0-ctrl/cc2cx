@@ -68,6 +68,11 @@ function dependencyStatusLabel(
   return "建议项";
 }
 
+function formatMigrationTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 export function AgentInstallPanel({
   isOpen,
   onClose,
@@ -178,7 +183,8 @@ export function AgentInstallPanel({
     setLegacyBusy(true);
     setLegacyMessage(null);
     try {
-      if (legacyStatus?.database_path) {
+      const automatic = Boolean(legacyStatus?.database_path);
+      if (automatic) {
         await legacyMigrationApi.migrate();
       } else {
         const filePath =
@@ -187,9 +193,14 @@ export function AgentInstallPanel({
         await settingsApi.importConfigFromFile(filePath);
       }
       await load();
+      if (automatic) {
+        const refreshed = await legacyMigrationApi.detect();
+        setLegacyStatus(refreshed);
+        setSelectedLegacySql(refreshed.sql_exports?.[0]?.path ?? null);
+      }
       setLegacyMessage(
-        legacyStatus?.database_path
-          ? "旧 CC Switch 配置已自动同步。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Legacy configuration migrated automatically; source data was kept."
+        automatic
+          ? "迁移成功：旧 CC Switch 配置已自动同步。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Migration succeeded; source data was kept."
           : "旧 CC Switch 配置已导入。原数据未删除，敏感登录凭据仍需在 Agent 中重新确认。/ Imported successfully. Legacy data was kept; recheck sensitive logins in each Agent.",
       );
     } catch (reason) {
@@ -375,6 +386,14 @@ export function AgentInstallPanel({
                 <RefreshCw className="mr-2 h-4 w-4" />
                 检测旧 CC Switch / Detect
               </Button>
+              {legacyStatus?.last_migrated_at && (
+                <span
+                  data-testid="legacy-migration-last-run"
+                  className="text-xs text-emerald-600 dark:text-emerald-400"
+                >
+                  ✓ 上次迁移：{formatMigrationTime(legacyStatus.last_migrated_at)}
+                </span>
+              )}
               <Button
                 size="sm"
                 onClick={() => void importLegacy()}

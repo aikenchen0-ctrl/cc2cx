@@ -592,4 +592,29 @@ describe("AgentInstallPanel", () => {
     );
     expect(openFileDialog).not.toHaveBeenCalled();
   });
+
+  it("shows the last automatic migration time when available", async () => {
+    vi.mocked(agentInstallApi.getStatuses).mockResolvedValue(statuses);
+    vi.mocked(legacyMigrationApi.detect).mockResolvedValue({
+      detected: true,
+      data_dir: "C:\\Users\\Test\\.cc-switch",
+      database_path: "C:\\Users\\Test\\.cc-switch\\cc-switch.db",
+      config_path: null,
+      skills_dir: null,
+      backups_dir: null,
+      install_paths: [],
+      uninstall_paths: [],
+      sql_exports: [],
+      last_migrated_at: "2026-09-13T18:51:31+08:00",
+    });
+
+    render(<AgentInstallPanel isOpen onClose={() => undefined} />);
+
+    expect(
+      await screen.findByTestId("legacy-migration-last-run"),
+    ).toHaveTextContent("上次迁移");
+    expect(screen.getByTestId("legacy-migration-last-run")).toHaveTextContent(
+      "2026",
+    );
+  });
 });

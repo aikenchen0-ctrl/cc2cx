@@ -304,7 +304,10 @@ pub struct LegacyCcSwitchStatus {
     install_paths: Vec<String>,
     sql_exports: Vec<LegacySqlExportCandidate>,
     uninstall_paths: Vec<String>,
+    last_migrated_at: Option<String>,
 }
+
+pub(crate) const LEGACY_CC_SWITCH_LAST_MIGRATED_AT_KEY: &str = "legacy_cc_switch_last_migrated_at";
 
 #[derive(serde::Serialize)]
 pub struct LegacySqlExportCandidate {
@@ -507,6 +510,7 @@ fn legacy_cc_switch_status(home: &Path) -> LegacyCcSwitchStatus {
         install_paths,
         sql_exports: discover_legacy_sql_exports(home, &data_dir, &backups_dir),
         uninstall_paths,
+        last_migrated_at: None,
     }
 }
 
@@ -2195,9 +2199,16 @@ fn deepseek_launch_invocation() -> String {
 }
 
 #[tauri::command]
-pub async fn detect_legacy_cc_switch() -> Result<LegacyCcSwitchStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        Ok(legacy_cc_switch_status(&crate::config::get_home_dir()))
+pub async fn detect_legacy_cc_switch(
+    state: State<'_, crate::store::AppState>,
+) -> Result<LegacyCcSwitchStatus, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut status = legacy_cc_switch_status(&crate::config::get_home_dir());
+        status.last_migrated_at = db
+            .get_setting(LEGACY_CC_SWITCH_LAST_MIGRATED_AT_KEY)
+            .map_err(|error| format!("读取旧 CC Switch 迁移记录失败: {error}"))?;
+        Ok(status)
     })
     .await
     .map_err(|error| format!("检测旧 CC Switch 失败: {error}"))?
