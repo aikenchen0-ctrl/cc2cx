@@ -97,7 +97,7 @@
 
 - Node.js 20 或更高版本
 - Corepack 与 pnpm 10.12.3
-- Rust 1.85 或更高版本
+- Rust 1.88 或更高版本
 - Windows 需要 Visual Studio C++ 工具链
 - macOS 需要 Xcode Command Line Tools
 - 各平台对应的 [Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)
@@ -112,7 +112,9 @@ corepack pnpm@10.12.3 install --frozen-lockfile
 corepack pnpm@10.12.3 dev
 ```
 
-开发模式会启动 Vite 和 Tauri 桌面窗口，前端开发地址为 `http://localhost:3000/`。该地址仅用于开发，不会被写入生产安装包。
+开发模式会启动 Vite 和 Tauri 桌面窗口，开发覆盖配置中的前端地址为 `http://127.0.0.1:3000/`。该地址仅用于开发，不会进入默认运行时配置。
+
+不要把 `src-tauri/target/debug/cc-launch.exe` 当作安装包分发。它是调试启动器，可能依赖本机 Vite 服务；在另一台电脑上运行会出现“无法显示页面”。跨机器安装请使用 `src-tauri/target/release/bundle/msi/` 下的 MSI。构建脚本会拒绝没有内嵌前端资源的可执行文件。
 
 ## 检查与测试
 
