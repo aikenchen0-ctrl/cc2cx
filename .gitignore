@@ -33,6 +33,7 @@ out/
 # Rust and Tauri build output
 target/
 **/target/
+**/target-test/
 .cargo-test-secret-fix/
 src-tauri/.tauri/
 src-tauri/*.msi

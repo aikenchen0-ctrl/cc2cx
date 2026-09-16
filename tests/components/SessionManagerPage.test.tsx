@@ -695,4 +695,61 @@ describe("SessionManagerPage", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   });
+
+  it("opens the transfer dialog for the selected session and refreshes after success", async () => {
+    const listTargetsSpy = vi
+      .spyOn(sessionsApi, "listTransferTargets")
+      .mockResolvedValue([
+        {
+          providerId: "codex",
+          alias: "cod",
+          name: "Codex",
+          installed: true,
+          writeSupport: { kind: "supported" },
+          launchSupport: { kind: "supported" },
+        },
+        {
+          providerId: "claude",
+          alias: "cc",
+          name: "Claude Code",
+          installed: true,
+          writeSupport: { kind: "supported" },
+          launchSupport: { kind: "supported" },
+        },
+      ]);
+    const transferSpy = vi.spyOn(sessionsApi, "transfer").mockResolvedValue({
+      sourceProviderId: "codex",
+      sourceSessionId: "codex-session-1",
+      sourcePath: "/mock/codex/session-1.jsonl",
+      targetProviderId: "claude",
+      targetSessionId: "claude-transferred-1",
+      workspace: "/mock/codex",
+      writtenPaths: ["/mock/claude/claude-transferred-1.jsonl"],
+      warnings: [],
+      lossy: false,
+    });
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Alpha Session" }),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /转换并写回会话/i }));
+
+    expect(
+      await screen.findByRole("heading", { name: "跨工具写回会话" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Alpha Session.*codex/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认写回" }));
+
+    await waitFor(() => expect(transferSpy).toHaveBeenCalled());
+    expect(await screen.findByRole("status")).toHaveTextContent("写回成功");
+
+    listTargetsSpy.mockRestore();
+    transferSpy.mockRestore();
+  });
 });

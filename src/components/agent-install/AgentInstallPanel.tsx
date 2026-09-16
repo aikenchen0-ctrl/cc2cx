@@ -373,7 +373,8 @@ export function AgentInstallPanel({
               <p className="mt-1 text-xs text-muted-foreground">
                 优先从旧数据库自动读取并安全迁移；自动方式失败时可使用 SQL
                 导出，并自动备份，不会删除旧数据。/ Read-only database migration
-                is preferred; SQL import remains as a fallback and creates a backup.
+                is preferred; SQL import remains as a fallback and creates a
+                backup.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -391,7 +392,8 @@ export function AgentInstallPanel({
                   data-testid="legacy-migration-last-run"
                   className="text-xs text-emerald-600 dark:text-emerald-400"
                 >
-                  ✓ 上次迁移：{formatMigrationTime(legacyStatus.last_migrated_at)}
+                  ✓ 上次迁移：
+                  {formatMigrationTime(legacyStatus.last_migrated_at)}
                 </span>
               )}
               <Button

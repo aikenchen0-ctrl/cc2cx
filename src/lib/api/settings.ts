@@ -26,6 +26,52 @@ export interface CodexUnifyHistoryRestoreResult {
   skippedReason?: string;
 }
 
+export type CursorIntegrationState =
+  | "disabled"
+  | "starting"
+  | "running"
+  | "degraded"
+  | "stopping";
+
+export type CursorCaState = "missing" | "invalid" | "untrusted" | "ready";
+
+export type CursorBackendHealth =
+  | "not_required"
+  | "not_observed"
+  | "healthy"
+  | "auth_failed"
+  | "timeout"
+  | "transport_failed"
+  | "protocol_failed"
+  | "failed";
+
+export interface CursorFakeIpEntry {
+  ip: string;
+  hostname: string;
+}
+
+export interface CursorTransparentEntryStatus {
+  running: boolean;
+  addresses: string[];
+}
+
+export interface CursorHarnessStatus {
+  state: CursorIntegrationState;
+  ca: CursorCaState;
+  caInstallCommand: string | null;
+  caUninstallCommand: string | null;
+  settingsApplied: boolean;
+  proxyUrl: string | null;
+  proxyPort: number | null;
+  backendPort: number | null;
+  backendHealth: CursorBackendHealth | null;
+  backendErrorCode: string | null;
+  settingsBackupPresent: boolean;
+  transparentEntry?: CursorTransparentEntryStatus | null;
+  managedHosts?: boolean;
+  fakeIpEntries?: CursorFakeIpEntry[];
+}
+
 export interface WebDavSyncResult {
   status: string;
 }
@@ -33,6 +79,30 @@ export interface WebDavSyncResult {
 export const settingsApi = {
   async get(): Promise<Settings> {
     return await invoke("get_settings");
+  },
+
+  async getCursorHarnessStatus(): Promise<CursorHarnessStatus> {
+    return await invoke("get_cursor_harness_status");
+  },
+
+  async initializeCursorCa(): Promise<CursorHarnessStatus> {
+    return await invoke("initialize_cursor_ca");
+  },
+
+  async installCursorCa(): Promise<CursorHarnessStatus> {
+    return await invoke("install_cursor_ca");
+  },
+
+  async uninstallCursorCa(): Promise<CursorHarnessStatus> {
+    return await invoke("uninstall_cursor_ca");
+  },
+
+  async startCursorIntegration(): Promise<CursorHarnessStatus> {
+    return await invoke("start_cursor_integration");
+  },
+
+  async stopCursorIntegration(): Promise<CursorHarnessStatus> {
+    return await invoke("stop_cursor_integration");
   },
 
   async save(settings: Settings): Promise<boolean> {

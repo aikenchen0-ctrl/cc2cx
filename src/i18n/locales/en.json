@@ -367,6 +367,59 @@
         "running": "Running",
         "stopped": "Stopped"
       },
+      "cursor": {
+        "title": "Cursor Local Integration",
+        "description": "Manage Cursor's user-level proxy, CA trust, and reversible lifecycle",
+        "integrationState": "Integration state",
+        "caState": "CA state",
+        "proxyAddress": "Proxy address",
+        "proxyUnavailable": "Local proxy is not running",
+        "transparentActive": "Transparent entry running: {{addresses}}",
+        "transparentInactive": "Transparent entry is not running",
+        "hostsManaged": "A reversible CC2CX Hosts block is applied",
+        "hostsUnmanaged": "System Hosts is not managed",
+        "backupPresent": "A settings recovery backup is present and will be cleaned on stop or recovery",
+        "backupAbsent": "No settings recovery backup is pending",
+        "backendHealth": "Backend health",
+        "backendError": "Latest error code: {{code}}",
+        "backendHealthStates": {
+          "not_required": "Not required",
+          "not_observed": "Not observed",
+          "healthy": "Healthy",
+          "auth_failed": "Authentication failed",
+          "timeout": "Timeout",
+          "transport_failed": "Transport failed",
+          "protocol_failed": "Protocol failed",
+          "failed": "Failed"
+        },
+        "untrustedHint": "The CA is not trusted yet. Starting integration does not install it automatically; click Install CA and confirm the system prompt before using Cursor.",
+        "hostsElevationHint": "Start writes api2/api3.cursor.sh into the system Hosts file and listens on port 443 for each fake IP. If that file is not writable, startup fails closed and does not edit any other Hosts file.",
+        "installCommand": "Explicit install command",
+        "refresh": "Refresh Cursor integration status",
+        "start": "Start integration",
+        "stop": "Stop integration",
+        "initializeCa": "Initialize CA",
+        "installCa": "Install CA",
+        "uninstallCa": "Uninstall CA",
+        "initializeSuccess": "Cursor CA initialized",
+        "installSuccess": "Cursor CA installed",
+        "uninstallSuccess": "Cursor CA uninstalled",
+        "startSuccess": "Cursor integration started",
+        "stopSuccess": "Cursor integration stopped",
+        "states": {
+          "disabled": "Disabled",
+          "starting": "Starting",
+          "running": "Running",
+          "degraded": "Degraded",
+          "stopping": "Stopping"
+        },
+        "caStates": {
+          "missing": "Not initialized",
+          "invalid": "Invalid",
+          "untrusted": "Untrusted",
+          "ready": "Trusted"
+        }
+      },
       "connectivityCheck": {
         "title": "Connectivity Check Settings",
         "description": "Configure timeout, retries, and the slow-response threshold for provider reachability checks"

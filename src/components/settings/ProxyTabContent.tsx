@@ -15,6 +15,7 @@ import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPa
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
+import { CursorIntegrationPanel } from "@/components/settings/CursorIntegrationPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
@@ -95,7 +96,34 @@ export function ProxyTabContent({
       transition={{ duration: 0.3 }}
       className="space-y-4"
     >
-      <Accordion type="multiple" defaultValue={[]} className="w-full space-y-4">
+      <Accordion
+        type="multiple"
+        defaultValue={["cursor"]}
+        className="w-full space-y-4"
+      >
+        {/* Cursor local integration */}
+        <AccordionItem
+          value="cursor"
+          className="rounded-xl glass-card overflow-hidden"
+        >
+          <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+            <div className="flex items-center gap-3">
+              <ShieldAlert className="h-5 w-5 text-sky-500" />
+              <div className="text-left">
+                <h3 className="text-base font-semibold">
+                  {t("settings.advanced.cursor.title")}
+                </h3>
+                <p className="text-sm text-muted-foreground font-normal">
+                  {t("settings.advanced.cursor.description")}
+                </p>
+              </div>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+            <CursorIntegrationPanel />
+          </AccordionContent>
+        </AccordionItem>
+
         {/* Local Proxy */}
         <AccordionItem
           value="proxy"

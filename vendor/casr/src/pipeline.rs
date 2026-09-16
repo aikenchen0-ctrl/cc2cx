@@ -1,0 +1,2374 @@
+//! Conversion pipeline orchestrator.
+//!
+//! Ties detection, reading, validation, writing, and verification into a
+//! single `convert()` call. Generic over the [`Provider`](crate::providers::Provider)
+//! trait — concrete providers are wired in via the registry.
+
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+
+use rusqlite::{Connection, DatabaseName, OpenFlags};
+use tracing::{debug, info, warn};
+
+use crate::discovery::{ProviderRegistry, SourceHint};
+use crate::error::CasrError;
+use crate::model::{CanonicalMessage, CanonicalSession, MessageRole, reindex_messages};
+use crate::providers::{RollbackPath, WriteOptions, WrittenSession};
+
+/// Top-level orchestrator for session conversion.
+pub struct ConversionPipeline {
+    pub registry: ProviderRegistry,
+}
+
+/// Options passed through the pipeline from CLI flags.
+#[derive(Debug, Clone)]
+pub struct ConvertOptions {
+    pub dry_run: bool,
+    pub force: bool,
+    pub verbose: bool,
+    pub enrich: bool,
+    pub source_hint: Option<String>,
+    /// Cap the transferred history at roughly this many tokens (0 = unlimited).
+    /// Applied only to cross-provider conversions; mirrors the source agent's
+    /// live context rather than its full archive.
+    pub max_context_tokens: usize,
+    /// Truncate each tool result/observation to this many characters (0 = unlimited).
+    pub max_tool_output: usize,
+    /// Keep source-agent reasoning traces (dropped by default for cross-agent
+    /// handoffs since the target agent cannot use another agent's hidden reasoning).
+    pub keep_reasoning: bool,
+    /// Explicit workspace/project directory for the target session. Overrides
+    /// whatever the source session recorded (or failed to record). Cwd-keyed
+    /// providers (e.g. Claude Code) resolve sessions by matching the resume
+    /// command's cwd against the session's workspace bucket, so getting this
+    /// right is what makes `--resume` actually find the session.
+    pub workspace_override: Option<std::path::PathBuf>,
+}
+
+impl Default for ConvertOptions {
+    fn default() -> Self {
+        // No-op budgeting by default; the CLI layer supplies the smart caps.
+        ConvertOptions {
+            dry_run: false,
+            force: false,
+            verbose: false,
+            enrich: false,
+            source_hint: None,
+            max_context_tokens: 0,
+            max_tool_output: 0,
+            keep_reasoning: true,
+            workspace_override: None,
+        }
+    }
+}
+
+/// Outcome of a successful (or dry-run) conversion.
+#[derive(Debug)]
+pub struct ConversionResult {
+    pub source_provider: String,
+    pub target_provider: String,
+    pub canonical_session: CanonicalSession,
+    pub written: Option<WrittenSession>,
+    pub warnings: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Session validation
+// ---------------------------------------------------------------------------
+
+/// Result of validating a canonical session.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationResult {
+    /// Fatal issues — pipeline must stop.
+    pub errors: Vec<String>,
+    /// Non-fatal issues — surfaced in UX/JSON but conversion continues.
+    pub warnings: Vec<String>,
+    /// Informational notes — shown in verbose/trace mode.
+    pub info: Vec<String>,
+}
+
+impl ValidationResult {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
+/// Make a user-supplied workspace path absolute.
+///
+/// Cwd-keyed providers (Claude Code) turn the workspace into a path-encoded
+/// bucket name and `--resume` only finds sessions whose bucket matches the
+/// invoking cwd — which is always absolute. A relative `--workspace ./foo`
+/// would therefore write a bucket nothing can match. Existing directories are
+/// canonicalized (resolving `..` and symlinks the same way a shell's cwd is);
+/// anything else is joined onto the current directory and returned as-is.
+pub fn absolutize_workspace(ws: &std::path::Path) -> std::path::PathBuf {
+    let absolute = if let Ok(canonical) = std::fs::canonicalize(ws) {
+        canonical
+    } else if ws.is_absolute() {
+        ws.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| ws.to_path_buf(), |cwd| cwd.join(ws))
+    };
+    crate::model::normalize_workspace_for_cli(&absolute)
+}
+
+/// Validate a canonical session for completeness and quality.
+///
+/// Returns errors (fatal), warnings (non-fatal), and info notes.
+pub fn validate_session(session: &CanonicalSession) -> ValidationResult {
+    let mut result = ValidationResult::default();
+
+    // ERRORS — pipeline stops.
+    if session.messages.is_empty() {
+        result.errors.push("Session has no messages.".to_string());
+        return result; // No point checking further.
+    }
+
+    let has_user = session.messages.iter().any(|m| m.role == MessageRole::User);
+    let has_assistant = session
+        .messages
+        .iter()
+        .any(|m| m.role == MessageRole::Assistant);
+
+    if !has_user || !has_assistant {
+        result.errors.push(
+            "Session must have at least one user message and one assistant message.".to_string(),
+        );
+    }
+
+    // WARNINGS — conversion continues.
+    if session.workspace.is_none() {
+        result.warnings.push(
+            "Session has no workspace. Target agent may not know which project to work in, \
+and cwd-keyed providers (e.g. Claude Code) will only find the session when resumed from \
+the directory stamped into it. Use --workspace <path> to set it explicitly."
+                .to_string(),
+        );
+    }
+
+    let has_timestamps = session.messages.iter().any(|m| m.timestamp.is_some());
+    if !has_timestamps {
+        result
+            .warnings
+            .push("Session has no timestamps. Message ordering may be unreliable.".to_string());
+    }
+
+    if session.messages.len() < 3 {
+        result.warnings.push(
+            "Very short session (<3 messages). May not provide enough context for resumption."
+                .to_string(),
+        );
+    }
+
+    // INFO — verbose/trace only.
+    let has_tool_calls = session.messages.iter().any(|m| !m.tool_calls.is_empty());
+    if has_tool_calls {
+        result.info.push(
+            "Session contains tool calls. Tool semantics may not translate perfectly between providers."
+                .to_string(),
+        );
+    }
+
+    let mut known_tool_call_ids: HashSet<&str> = HashSet::new();
+    for msg in &session.messages {
+        for call in &msg.tool_calls {
+            if let Some(call_id) = call.id.as_deref() {
+                known_tool_call_ids.insert(call_id);
+            }
+        }
+    }
+
+    for msg in &session.messages {
+        for tool_result in &msg.tool_results {
+            if let Some(call_id) = tool_result.call_id.as_deref()
+                && !known_tool_call_ids.contains(call_id)
+            {
+                result.info.push(format!(
+                    "Tool result at message index {} references unknown tool call id '{call_id}'.",
+                    msg.idx
+                ));
+                break;
+            }
+        }
+    }
+
+    result
+}
+
+fn prepend_enrichment_messages(
+    session: &mut CanonicalSession,
+    source_provider: &str,
+    target_provider: &str,
+    source_session_id: &str,
+) -> usize {
+    let first_timestamp = session.messages.iter().filter_map(|m| m.timestamp).min();
+    let notice_timestamp = first_timestamp.map(|ts| ts.saturating_sub(2));
+    let summary_timestamp = notice_timestamp.map(|ts| ts.saturating_add(1));
+
+    let mut notice_lines = vec![
+        "[casr synthetic context]".to_string(),
+        format!(
+            "This session was originally created in {source_provider} and converted to {target_provider} format by casr."
+        ),
+        format!("Original session ID: {source_session_id}."),
+        "Some provider-specific context may have been lost in conversion.".to_string(),
+        format!("Original message count: {}.", session.messages.len()),
+    ];
+    if let Some(workspace) = &session.workspace {
+        notice_lines.push(format!("Workspace: {}", workspace.display()));
+    }
+
+    let (summary_count, summary_lines) = build_recent_summary(session, 4, 180);
+    let summary_body = format!(
+        "[casr synthetic context]\nRecent conversation snapshot (last {summary_count} message(s)):\n{summary_lines}"
+    );
+
+    let notice = CanonicalMessage {
+        idx: 0,
+        role: MessageRole::System,
+        content: notice_lines.join("\n"),
+        timestamp: notice_timestamp,
+        author: Some("casr-enrichment".to_string()),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        extra: serde_json::json!({
+            "casr_enrichment": true,
+            "synthetic": true,
+            "enrichment_type": "conversion_notice",
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "source_session_id": source_session_id,
+        }),
+    };
+
+    let summary = CanonicalMessage {
+        idx: 1,
+        role: MessageRole::System,
+        content: summary_body,
+        timestamp: summary_timestamp,
+        author: Some("casr-enrichment".to_string()),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        extra: serde_json::json!({
+            "casr_enrichment": true,
+            "synthetic": true,
+            "enrichment_type": "recent_summary",
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "source_session_id": source_session_id,
+            "summary_message_count": summary_count,
+        }),
+    };
+
+    let inserted = 2;
+    session.messages.insert(0, summary);
+    session.messages.insert(0, notice);
+    reindex_messages(&mut session.messages);
+    inserted
+}
+
+fn build_recent_summary(
+    session: &CanonicalSession,
+    max_messages: usize,
+    max_chars_per_message: usize,
+) -> (usize, String) {
+    let start = session.messages.len().saturating_sub(max_messages);
+    let mut lines: Vec<String> = Vec::new();
+
+    for msg in &session.messages[start..] {
+        let role = message_role_label(&msg.role);
+        let compact_content = compact_summary_text(&msg.content, max_chars_per_message);
+        lines.push(format!("- {role}: {compact_content}"));
+    }
+
+    if lines.is_empty() {
+        lines.push("- (no messages)".to_string());
+    }
+
+    (lines.len(), lines.join("\n"))
+}
+
+fn compact_summary_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "[empty]".to_string();
+    }
+
+    let compact_len = compact.chars().count();
+    if compact_len <= max_chars {
+        return compact;
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let mut truncated = String::new();
+    for ch in compact.chars().take(max_chars - 3) {
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+fn message_role_label(role: &MessageRole) -> String {
+    match role {
+        MessageRole::User => "user".to_string(),
+        MessageRole::Assistant => "assistant".to_string(),
+        MessageRole::Tool => "tool".to_string(),
+        MessageRole::System => "system".to_string(),
+        MessageRole::Other(other) => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline orchestrator
+// ---------------------------------------------------------------------------
+
+impl ConversionPipeline {
+    /// Run the full detect → read → validate → write → verify pipeline.
+    pub fn convert(
+        &self,
+        target_alias: &str,
+        session_id: &str,
+        opts: ConvertOptions,
+    ) -> anyhow::Result<ConversionResult> {
+        // Validate command-level target input before scanning provider homes.
+        // Otherwise an invalid target can be masked by a missing or ambiguous
+        // source session, making a caller fix the wrong argument first.
+        if self.registry.find_by_alias(target_alias).is_none() {
+            return Err(CasrError::UnknownProviderAlias {
+                alias: target_alias.to_string(),
+                known_aliases: self.registry.known_aliases(),
+            }
+            .into());
+        }
+
+        let source_hint = opts.source_hint.as_deref().map(SourceHint::parse);
+        let resolved = self
+            .registry
+            .resolve_session(session_id, source_hint.as_ref())?;
+        self.convert_resolved(target_alias, resolved, None, opts)
+    }
+
+    /// Convert a session whose provider and native path were already selected
+    /// by a caller such as a desktop UI.
+    pub fn convert_source_path(
+        &self,
+        source_alias: &str,
+        source_path: &Path,
+        target_alias: &str,
+        opts: ConvertOptions,
+    ) -> anyhow::Result<ConversionResult> {
+        let resolved = self
+            .registry
+            .resolve_source_path(source_alias, source_path)?;
+        self.convert_resolved(target_alias, resolved, None, opts)
+    }
+
+    /// Convert a caller-owned canonical source while retaining native source
+    /// provider/path identity for capability checks and result metadata.
+    ///
+    /// Desktop adapters use this after validating the session identity from a
+    /// single native read, avoiding a time-of-check/time-of-use second read.
+    pub fn convert_canonical_source_path(
+        &self,
+        source_alias: &str,
+        source_path: &Path,
+        canonical: CanonicalSession,
+        target_alias: &str,
+        opts: ConvertOptions,
+    ) -> anyhow::Result<ConversionResult> {
+        let resolved = self
+            .registry
+            .resolve_source_path(source_alias, source_path)?;
+        self.convert_resolved(target_alias, resolved, Some(canonical), opts)
+    }
+
+    fn convert_resolved(
+        &self,
+        target_alias: &str,
+        resolved: crate::discovery::ResolvedSession<'_>,
+        canonical: Option<CanonicalSession>,
+        opts: ConvertOptions,
+    ) -> anyhow::Result<ConversionResult> {
+        // 1. Resolve target provider.
+        let target_provider = self.registry.find_by_alias(target_alias).ok_or_else(|| {
+            CasrError::UnknownProviderAlias {
+                alias: target_alias.to_string(),
+                known_aliases: self.registry.known_aliases(),
+            }
+        })?;
+
+        info!(
+            provider = target_provider.cli_alias(),
+            phase = "start",
+            "starting conversion"
+        );
+
+        let target_detection = target_provider.detect();
+        debug!(
+            provider = target_provider.cli_alias(),
+            phase = "target_detection",
+            "target provider detection"
+        );
+        let mut all_warnings: Vec<String> = Vec::new();
+        if !target_detection.installed {
+            warn!(
+                provider = target_provider.cli_alias(),
+                phase = "target_detection",
+                "target provider CLI not detected; conversion will continue with filesystem-only checks"
+            );
+            all_warnings.push(format!(
+                "Target provider '{}' is not detected as installed. Conversion can still write files, \
+but resume may fail until the CLI is installed.",
+                target_provider.name()
+            ));
+        }
+
+        debug!(
+            provider = resolved.provider.cli_alias(),
+            phase = "source_resolved",
+            "source session resolved"
+        );
+
+        // 3. Read source session into canonical IR.
+        let mut canonical = match canonical {
+            Some(canonical) => canonical,
+            None => resolved.provider.read_session(&resolved.path)?,
+        };
+        // Native file-based providers frequently use the canonical session ID
+        // as a path component. A source file is untrusted input, so replace
+        // path syntax before any target writer can concatenate the ID with its
+        // storage root. Keep same-provider resume identity unchanged because
+        // that path is never written by this conversion.
+        let same_provider = !opts.enrich && resolved.provider.slug() == target_provider.slug();
+        if !same_provider
+            && crate::providers::safe_session_id_for_path(&canonical.session_id).is_err()
+        {
+            canonical.session_id = format!("casr-{}", uuid::Uuid::new_v4().simple());
+            all_warnings.push(
+                "Source session ID was not safe for a native path; generated a new target session ID."
+                    .to_string(),
+            );
+        }
+        debug!(
+            provider = resolved.provider.cli_alias(),
+            phase = "source_read",
+            message_count = canonical.messages.len(),
+            "source session read"
+        );
+
+        // 3b. Resolve the target workspace BEFORE validation/write.
+        //
+        // Cwd-keyed providers (e.g. Claude Code) bucket sessions by a
+        // path-encoded workspace directory and `--resume` only finds sessions
+        // whose bucket matches the invoking cwd. Silently defaulting a missing
+        // workspace to `/tmp` (the old behavior) produced sessions that
+        // "converted fine" but could never be resumed from the real project
+        // directory (GH #20).
+        if let Some(ws) = &opts.workspace_override {
+            if !ws.is_dir() {
+                all_warnings.push(format!(
+                    "--workspace {} does not exist (or is not a directory). Using it anyway; \
+create it before resuming or the target CLI may not find the session.",
+                    ws.display()
+                ));
+            }
+            // Absolutize: cwd-keyed providers encode the workspace path into a
+            // bucket name and compare it against the resume command's
+            // *absolute* cwd, so a relative `--workspace ./foo` would write a
+            // `--foo` bucket that can never match and silently reproduce the
+            // very unfindable-session bug this flag exists to fix.
+            let ws = absolutize_workspace(ws);
+            debug!(
+                provider = target_provider.cli_alias(),
+                phase = "workspace_override",
+                "workspace explicitly overridden via --workspace"
+            );
+            canonical.workspace = Some(ws);
+        } else if canonical.workspace.is_none() {
+            match std::env::current_dir() {
+                Ok(cwd) => {
+                    all_warnings.push(format!(
+                        "Session has no recorded workspace; defaulting to the current directory \
+{cwd_display}. The target CLI resolves sessions by cwd, so run the resume command FROM \
+{cwd_display} — or re-run with --workspace <path> to target the real project directory.",
+                        cwd_display = cwd.display()
+                    ));
+                    canonical.workspace = Some(cwd);
+                }
+                Err(err) => {
+                    all_warnings.push(format!(
+                        "Session has no recorded workspace and the current directory could not be \
+determined ({err}). Re-run with --workspace <path>; otherwise the target CLI may not find the \
+session unless your cwd matches the written workspace."
+                    ));
+                }
+            }
+        }
+
+        // Provider CLIs commonly derive their session bucket from the textual
+        // workspace path. Normalize source-provided paths as well as explicit
+        // overrides so Windows verbatim prefixes cannot create an unreachable
+        // target bucket.
+        if let Some(workspace) = canonical.workspace.take() {
+            canonical.workspace = Some(crate::model::normalize_workspace_for_cli(&workspace));
+        }
+
+        // 4. Validate.
+        let validation = validate_session(&canonical);
+        all_warnings.extend(validation.warnings.clone());
+
+        if validation.has_errors() {
+            return Err(CasrError::ValidationError {
+                errors: validation.errors,
+                warnings: validation.warnings,
+                info: validation.info,
+            }
+            .into());
+        }
+
+        for _note in &validation.info {
+            debug!(
+                provider = target_provider.cli_alias(),
+                phase = "validation_info",
+                "validation info"
+            );
+        }
+
+        // 5. Optional synthetic context enrichment.
+        if opts.enrich {
+            let source_session_id = canonical.session_id.clone();
+            let inserted = prepend_enrichment_messages(
+                &mut canonical,
+                resolved.provider.slug(),
+                target_provider.slug(),
+                &source_session_id,
+            );
+            info!(
+                provider = target_provider.cli_alias(),
+                phase = "enrichment",
+                message_count = inserted,
+                "applied casr enrichment"
+            );
+            all_warnings.push(format!(
+                "Added {inserted} synthetic context message(s) via --enrich."
+            ));
+        }
+
+        // 6. Dry-run short-circuit.
+        if opts.dry_run {
+            info!("dry run — skipping write and verify");
+            return Ok(ConversionResult {
+                source_provider: resolved.provider.slug().to_string(),
+                target_provider: target_provider.slug().to_string(),
+                canonical_session: canonical,
+                written: None,
+                warnings: all_warnings,
+            });
+        }
+
+        // 7. Same-provider short-circuit.
+        if same_provider {
+            info!(
+                provider = target_provider.cli_alias(),
+                phase = "same_provider",
+                "source and target provider are the same — skipping write and verify"
+            );
+            all_warnings.push(
+                "Source and target provider are the same. Skipping conversion write.".to_string(),
+            );
+            return Ok(ConversionResult {
+                source_provider: resolved.provider.slug().to_string(),
+                target_provider: target_provider.slug().to_string(),
+                canonical_session: canonical.clone(),
+                written: Some(WrittenSession {
+                    paths: Vec::new(),
+                    session_id: canonical.session_id.clone(),
+                    resume_command: target_provider.resume_command(&canonical.session_id),
+                    backup_path: None,
+                    rollback_paths: Vec::new(),
+                    warnings: Vec::new(),
+                }),
+                warnings: all_warnings,
+            });
+        }
+
+        // 7a2. Context budget (cross-provider only — same-provider short-circuited above).
+        //
+        // The Codex reader already collapses the on-disk archive to the live
+        // context (honoring compaction). This step keeps that context inside a
+        // target-friendly budget: drop the source agent's hidden reasoning,
+        // truncate oversized tool observations, then drop the oldest turns if
+        // still over the token cap — preserving the original task message and
+        // the most recent history, and never severing tool_use/tool_result pairs.
+        let budget_warnings = apply_context_budget(
+            &mut canonical,
+            opts.max_context_tokens,
+            opts.max_tool_output,
+            opts.keep_reasoning,
+        );
+        all_warnings.extend(budget_warnings);
+
+        // 7b. Normalize tool-only messages with empty content.
+        //
+        // Some source formats (notably Codex with `originator: codex_exec`)
+        // produce canonical messages that have empty `content` but non-empty
+        // `tool_calls` and/or `tool_results`.  Target writers (e.g. Pi-Agent)
+        // either synthesize readable content from tool metadata or emit
+        // toolCall blocks that the reader flattens into text on read-back.
+        // Unless we mirror that synthesis here the read-back verification
+        // will see a content mismatch ("wrote 0 bytes, read back N bytes").
+        //
+        // Fix: materialise the tool-call/result text into `content` on the
+        // canonical message itself so that write ↔ readback is consistent.
+        //
+        // This step is skipped for structured-tool targets (Claude Code), which
+        // round-trip `tool_use` / `tool_result` as native content blocks. Adding
+        // a synthesized text block there would corrupt the round-trip and cause
+        // the Anthropic API to reject the replayed history alongside the
+        // matching `tool_result`.
+        let target_preserves_tool_blocks = target_provider.slug() == "claude-code";
+        if !target_preserves_tool_blocks {
+            for msg in &mut canonical.messages {
+                if !msg.content.trim().is_empty() {
+                    continue;
+                }
+
+                let has_tool_calls = !msg.tool_calls.is_empty();
+                let has_tool_results = !msg.tool_results.is_empty();
+
+                if !has_tool_calls && !has_tool_results {
+                    continue;
+                }
+
+                let mut parts: Vec<String> = Vec::new();
+
+                // Synthesize text for tool calls (matches Pi reader's format).
+                for tc in &msg.tool_calls {
+                    parts.push(format!("[Tool: {}]", tc.name));
+                }
+
+                // Synthesize text for tool results.
+                for tr in &msg.tool_results {
+                    if tr.is_error {
+                        parts.push(format!("[Tool Error] {}", tr.content));
+                    } else {
+                        parts.push(format!("[Tool Output] {}", tr.content));
+                    }
+                }
+
+                if !parts.is_empty() {
+                    msg.content = parts.join("\n");
+                }
+            }
+        }
+
+        // 8. Write to target provider.
+        let write_opts = WriteOptions { force: opts.force };
+        let mut written = target_provider.write_session(&canonical, &write_opts)?;
+        info!(
+            provider = target_provider.cli_alias(),
+            phase = "session_written",
+            message_count = canonical.messages.len(),
+            "session written"
+        );
+        // Surface any non-fatal writer warnings (e.g. the target session was
+        // written but could not be registered in the provider's resume index).
+        all_warnings.extend(written.warnings.iter().cloned());
+
+        // 9. Read-back verification.
+        if let Some(first_path) = written.paths.first() {
+            match target_provider.read_session(first_path) {
+                Ok(readback) => {
+                    debug!(
+                        provider = target_provider.cli_alias(),
+                        phase = "readback",
+                        readback_messages = readback.messages.len(),
+                        original_messages = canonical.messages.len(),
+                        "read-back verification"
+                    );
+                    if let Some(detail) =
+                        readback_mismatch_detail(target_provider.slug(), &canonical, &readback)
+                    {
+                        warn!(
+                            provider = target_provider.cli_alias(),
+                            phase = "readback",
+                            error_type = "content_mismatch",
+                            "read-back verification failed"
+                        );
+                        let rollback_detail =
+                            match rollback_written_session(target_provider.slug(), &written) {
+                                Ok(()) => "rollback succeeded".to_string(),
+                                Err(rollback_error) => {
+                                    format!("rollback failed: {rollback_error}")
+                                }
+                            };
+                        return Err(CasrError::VerifyFailed {
+                            provider: target_provider.slug().to_string(),
+                            written_paths: written.paths.clone(),
+                            detail: format!("{detail}; {rollback_detail}"),
+                        }
+                        .into());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        provider = target_provider.cli_alias(),
+                        phase = "readback",
+                        error_type = "read_error",
+                        "read-back verification failed"
+                    );
+                    let rollback_detail =
+                        match rollback_written_session(target_provider.slug(), &written) {
+                            Ok(()) => "rollback succeeded".to_string(),
+                            Err(rollback_error) => {
+                                format!("rollback failed: {rollback_error}")
+                            }
+                        };
+                    return Err(CasrError::VerifyFailed {
+                        provider: target_provider.slug().to_string(),
+                        written_paths: written.paths.clone(),
+                        detail: format!("unable to read written session: {e}; {rollback_detail}"),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        // Cursor/OpenCode use a full SQLite snapshot only as a safety net for
+        // this verification window. Once the target has been read back
+        // successfully, remove the snapshot so we do not leave a large copy
+        // of the user's conversation database behind.
+        cleanup_sqlite_snapshot(target_provider.slug(), &mut written, &mut all_warnings);
+
+        Ok(ConversionResult {
+            source_provider: resolved.provider.slug().to_string(),
+            target_provider: target_provider.slug().to_string(),
+            canonical_session: canonical,
+            written: Some(written),
+            warnings: all_warnings,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context budget helpers
+// ---------------------------------------------------------------------------
+
+/// Rough token estimate (~4 chars/token) for one message, including tool I/O.
+fn estimate_message_tokens(m: &CanonicalMessage) -> usize {
+    let mut chars = m.content.len();
+    for tc in &m.tool_calls {
+        chars += tc.name.len() + tc.arguments.to_string().len();
+    }
+    for tr in &m.tool_results {
+        chars += tr.content.len();
+    }
+    chars / 4 + 1
+}
+
+/// Trim a string to ~`max` chars, keeping head and tail with an elision marker.
+/// Returns `None` if no truncation was needed.
+fn elide_middle(s: &str, max: usize) -> Option<String> {
+    if max == 0 {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return None;
+    }
+    let head_len = max.saturating_mul(2) / 3;
+    let tail_len = max.saturating_sub(head_len);
+    let omitted = chars.len() - head_len - tail_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    Some(format!("{head}\n…[casr: {omitted} chars elided]…\n{tail}"))
+}
+
+/// Remove `tool_use` blocks that lack a matching `tool_result` (and vice
+/// versa), then drop messages left with no content and no tool payloads.
+///
+/// The Anthropic API requires paired tool calls/results. After older turns are
+/// dropped by the token budget, previously-paired tool_use/tool_result entries
+/// can become orphaned; this function restores validity.
+fn repair_tool_pairing(session: &mut CanonicalSession) {
+    let result_ids: std::collections::HashSet<String> = session
+        .messages
+        .iter()
+        .flat_map(|m| m.tool_results.iter())
+        .filter_map(|tr| tr.call_id.clone())
+        .collect();
+    let call_ids: std::collections::HashSet<String> = session
+        .messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .filter_map(|tc| tc.id.clone())
+        .collect();
+    for m in &mut session.messages {
+        m.tool_calls.retain(|tc| match tc.id.as_deref() {
+            Some(id) => result_ids.contains(id),
+            None => true,
+        });
+        m.tool_results.retain(|tr| match tr.call_id.as_deref() {
+            Some(id) => call_ids.contains(id),
+            None => true,
+        });
+    }
+    session.messages.retain(|m| {
+        !(m.content.trim().is_empty() && m.tool_calls.is_empty() && m.tool_results.is_empty())
+    });
+}
+
+/// Fit a (cross-provider) session into a target-friendly context budget while
+/// preserving its meaning. Steps, in order:
+/// 1. Drop the source agent's hidden reasoning traces (another agent can't use them).
+/// 2. Truncate oversized tool observations.
+/// 3. Drop the oldest turns (excluding the first task message) if still over budget.
+/// 4. Repair orphaned tool_use/tool_result pairs that result from the dropping.
+///
+/// Returns human-readable notes about what was elided — never silent.
+fn apply_context_budget(
+    canonical: &mut CanonicalSession,
+    max_tokens: usize,
+    max_tool_output: usize,
+    keep_reasoning: bool,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // 1. Drop source-agent reasoning traces (unusable by another agent).
+    if !keep_reasoning {
+        let before = canonical.messages.len();
+        canonical
+            .messages
+            .retain(|m| m.author.as_deref() != Some("reasoning"));
+        let dropped = before - canonical.messages.len();
+        if dropped > 0 {
+            warnings.push(format!(
+                "Dropped {dropped} source reasoning trace(s); pass --keep-reasoning to retain."
+            ));
+        }
+    }
+
+    // 2. Truncate oversized tool observations (the dominant byte source).
+    if max_tool_output > 0 {
+        let mut truncated = 0usize;
+        for m in &mut canonical.messages {
+            for tr in &mut m.tool_results {
+                if let Some(short) = elide_middle(&tr.content, max_tool_output) {
+                    tr.content = short;
+                    truncated += 1;
+                }
+            }
+        }
+        if truncated > 0 {
+            warnings.push(format!(
+                "Truncated {truncated} oversized tool result(s) to ~{max_tool_output} chars each."
+            ));
+        }
+    }
+
+    // 3. Enforce the token budget by dropping the oldest turns, pinning the
+    //    first (task) message and keeping the most recent history.
+    if max_tokens > 0 && canonical.messages.len() > 1 {
+        let total: usize = canonical.messages.iter().map(estimate_message_tokens).sum();
+        if total > max_tokens {
+            let pinned = estimate_message_tokens(&canonical.messages[0]);
+            let mut budget_left = max_tokens.saturating_sub(pinned);
+            let mut keep_from = canonical.messages.len();
+            for i in (1..canonical.messages.len()).rev() {
+                let t = estimate_message_tokens(&canonical.messages[i]);
+                if t > budget_left {
+                    break;
+                }
+                budget_left -= t;
+                keep_from = i;
+            }
+            if keep_from > 1 {
+                let dropped = keep_from - 1;
+                let tail = canonical.messages.split_off(keep_from);
+                canonical.messages.truncate(1);
+                canonical.messages.extend(tail);
+                warnings.push(format!(
+                    "Context budget (~{max_tokens} tokens) exceeded; dropped {dropped} older \
+turn(s) between the task and the most recent history."
+                ));
+            }
+        }
+    }
+
+    // 4. Re-pair tool calls/results and drop now-empty messages.
+    repair_tool_pairing(canonical);
+    reindex_messages(&mut canonical.messages);
+
+    warnings
+}
+
+/// Coarse role bucket used for read-back verification.
+///
+/// Some target formats (notably Claude Code JSONL) don't distinguish between
+/// User, System, Tool, and Other roles — they all become `"user"` entries.
+/// When we read back the written session the roles come back as `User`,
+/// causing a spurious mismatch against the original `System`/`Tool`/`Other`.
+///
+/// This function maps every role to a small set of equivalence classes so the
+/// verification comparison is tolerant of this expected lossy round-trip.
+fn readback_role_bucket(role: &MessageRole) -> &'static str {
+    match role {
+        MessageRole::Assistant => "assistant",
+        // Everything else collapses into the "user" bucket because that is
+        // the only non-assistant entry type Claude Code (and similar formats)
+        // can represent.
+        MessageRole::User | MessageRole::System | MessageRole::Tool | MessageRole::Other(_) => {
+            "user"
+        }
+    }
+}
+
+/// Return the role bucket a target provider can actually represent.
+///
+/// Cursor's native bubble format only distinguishes user (type 1) from
+/// assistant (type 2); its writer therefore stores system, tool, and other
+/// canonical roles as assistant bubbles. Keep that lossy mapping scoped to
+/// Cursor so providers that preserve a user-like bucket (for example Claude
+/// Code) continue to be verified against their own read-back semantics.
+fn readback_role_bucket_for_target(target_provider: &str, role: &MessageRole) -> &'static str {
+    if target_provider == "cursor" {
+        return match role {
+            MessageRole::User => "user",
+            MessageRole::Assistant
+            | MessageRole::Tool
+            | MessageRole::System
+            | MessageRole::Other(_) => "assistant",
+        };
+    }
+
+    readback_role_bucket(role)
+}
+
+fn readback_mismatch_detail(
+    target_provider: &str,
+    canonical: &CanonicalSession,
+    readback: &CanonicalSession,
+) -> Option<String> {
+    if readback.messages.len() != canonical.messages.len() {
+        return Some(format!(
+            "message count mismatch: wrote {} messages, read back {}",
+            canonical.messages.len(),
+            readback.messages.len()
+        ));
+    }
+
+    for (i, (orig, rb)) in canonical
+        .messages
+        .iter()
+        .zip(readback.messages.iter())
+        .enumerate()
+    {
+        if readback_role_bucket_for_target(target_provider, &orig.role)
+            != readback_role_bucket(&rb.role)
+        {
+            return Some(format!(
+                "message role mismatch at idx {i}: wrote {:?}, read back {:?}",
+                orig.role, rb.role
+            ));
+        }
+        if orig.content != rb.content {
+            return Some(format!(
+                "message content mismatch at idx {i}: wrote {} bytes, read back {} bytes",
+                orig.content.len(),
+                rb.content.len()
+            ));
+        }
+    }
+
+    None
+}
+
+fn rollback_written_session(
+    provider_slug: &str,
+    written: &WrittenSession,
+) -> Result<(), CasrError> {
+    let fallback = if written.rollback_paths.is_empty() {
+        written
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                RollbackPath::new(
+                    path.clone(),
+                    (index == 0).then(|| written.backup_path.clone()).flatten(),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        written.rollback_paths.clone()
+    };
+
+    rollback_write_paths(provider_slug, &fallback)
+}
+
+/// Restore every physical file touched by a provider writer.
+///
+/// The list is ordered by the writer, but each entry is independent: a
+/// backup is restored to its own target, while files without backups are
+/// removed as newly-created output. This handles shared index files and
+/// provider virtual paths without assuming the first read path is the file
+/// that was backed up.
+pub fn rollback_write_paths(provider_slug: &str, paths: &[RollbackPath]) -> Result<(), CasrError> {
+    for entry in paths {
+        let target = &entry.target_path;
+        match std::fs::remove_file(target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CasrError::SessionWriteError {
+                    path: target.clone(),
+                    provider: provider_slug.to_string(),
+                    detail: format!("failed to remove unverified output before restore: {error}"),
+                });
+            }
+        }
+
+        if let Some(backup) = &entry.backup_path {
+            warn!(
+                provider = provider_slug,
+                phase = "rollback_restore",
+                "restoring backup after verification failure"
+            );
+            std::fs::rename(backup, target).map_err(|error| CasrError::SessionWriteError {
+                path: target.clone(),
+                provider: provider_slug.to_string(),
+                detail: format!("failed to restore backup: {error}"),
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a consistent online backup of a SQLite database before a provider
+/// mutates it. The backup is deliberately made through SQLite's backup API so
+/// WAL contents are included in the snapshot instead of copying only the
+/// main database file.
+pub fn backup_sqlite_database(
+    db_path: &Path,
+    provider_slug: &str,
+) -> Result<Option<PathBuf>, CasrError> {
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+
+    let backup_path = find_backup_path(db_path);
+    let source = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| CasrError::SessionWriteError {
+        path: db_path.to_path_buf(),
+        provider: provider_slug.to_string(),
+        detail: format!("failed to open SQLite database for rollback snapshot: {error}"),
+    })?;
+
+    if let Err(error) = source.backup(DatabaseName::Main, &backup_path, None) {
+        let _ = std::fs::remove_file(&backup_path);
+        return Err(CasrError::SessionWriteError {
+            path: db_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to create rollback snapshot: {error}"),
+        });
+    }
+
+    Ok(Some(backup_path))
+}
+
+/// Physical paths touched by a SQLite writer. SQLite may keep committed
+/// changes in `-wal` and `-shm` sidecars; removing them before restoring the
+/// main snapshot prevents the stale WAL from being replayed over the restore.
+pub fn sqlite_rollback_paths(db_path: &Path, backup_path: Option<PathBuf>) -> Vec<RollbackPath> {
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = db_path.as_os_str().to_os_string();
+    shm.push("-shm");
+
+    vec![
+        RollbackPath::new(db_path.to_path_buf(), backup_path),
+        RollbackPath::new(PathBuf::from(wal), None),
+        RollbackPath::new(PathBuf::from(shm), None),
+    ]
+}
+
+/// Remove the temporary SQLite snapshot after read-back verification succeeds.
+/// File-backed providers intentionally keep their `.bak` artifacts, so this
+/// cleanup is scoped to providers that use an online database snapshot solely
+/// for post-commit rollback.
+pub fn cleanup_sqlite_snapshot(
+    provider_slug: &str,
+    written: &mut WrittenSession,
+    warnings: &mut Vec<String>,
+) {
+    if !matches!(provider_slug, "codex" | "cursor" | "opencode") {
+        return;
+    }
+
+    let Some(backup_path) = written.backup_path.take() else {
+        return;
+    };
+
+    match std::fs::remove_file(&backup_path) {
+        Ok(()) => {
+            for entry in &mut written.rollback_paths {
+                if entry.backup_path.as_ref() == Some(&backup_path) {
+                    entry.backup_path = None;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for entry in &mut written.rollback_paths {
+                if entry.backup_path.as_ref() == Some(&backup_path) {
+                    entry.backup_path = None;
+                }
+            }
+        }
+        Err(error) => {
+            written.backup_path = Some(backup_path.clone());
+            warnings.push(format!(
+                "Could not remove temporary {provider_slug} SQLite rollback snapshot {}: {error}",
+                backup_path.display()
+            ));
+        }
+    }
+}
+
+/// Roll back files after a provider write failure while preserving both
+/// failure causes when cleanup itself cannot complete.
+pub fn rollback_after_write_error(
+    provider_slug: &str,
+    write_error: anyhow::Error,
+    paths: &[RollbackPath],
+) -> anyhow::Error {
+    match rollback_write_paths(provider_slug, paths) {
+        Ok(()) => write_error,
+        Err(rollback_error) => {
+            anyhow::anyhow!("{write_error}; rollback failed: {rollback_error}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Atomic file writing
+// ---------------------------------------------------------------------------
+
+/// Outcome of a successful atomic write operation.
+#[derive(Debug, Clone)]
+pub struct AtomicWriteOutcome {
+    /// Final destination path.
+    pub target_path: PathBuf,
+    /// Temp file used during write (already renamed away).
+    pub temp_path: PathBuf,
+    /// Path to the `.bak` backup of a pre-existing file (if `--force` was used).
+    pub backup_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteFailStage {
+    BackupRename,
+    TempFileCreate,
+    WriteAll,
+    Flush,
+    SyncAll,
+    FinalRename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ATOMIC_WRITE_FAIL_STAGE: std::cell::Cell<Option<AtomicWriteFailStage>> = const {
+        std::cell::Cell::new(None)
+    };
+    static ATOMIC_WRITE_FINALIZE_BARRIER: std::cell::RefCell<
+        Option<std::sync::Arc<std::sync::Barrier>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_atomic_write_fail_stage(stage: Option<AtomicWriteFailStage>) {
+    ATOMIC_WRITE_FAIL_STAGE.with(|slot| slot.set(stage));
+}
+
+#[cfg(test)]
+fn set_atomic_write_finalize_barrier(barrier: Option<std::sync::Arc<std::sync::Barrier>>) {
+    ATOMIC_WRITE_FINALIZE_BARRIER.with(|slot| *slot.borrow_mut() = barrier);
+}
+
+#[cfg(test)]
+fn maybe_wait_at_atomic_write_finalize_barrier() {
+    let barrier = ATOMIC_WRITE_FINALIZE_BARRIER.with(|slot| slot.borrow().clone());
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn maybe_inject_atomic_write_failure(stage: AtomicWriteFailStage) -> std::io::Result<()> {
+    let injected = ATOMIC_WRITE_FAIL_STAGE.with(|slot| slot.get() == Some(stage));
+    if injected {
+        return Err(std::io::Error::other(format!(
+            "injected atomic_write failure at stage {stage:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Write `content` atomically to `target_path` using temp-then-rename.
+///
+/// Guarantees: either the old target remains intact, or the new target is
+/// fully written and fsynced. Never leaves partial writes.
+///
+/// Returns `AtomicWriteOutcome` on success, or:
+/// - [`CasrError::SessionConflict`] if target exists and `force` is false.
+/// - [`CasrError::SessionWriteError`] on I/O failures.
+pub fn atomic_write(
+    target_path: &Path,
+    content: &[u8],
+    force: bool,
+    provider_slug: &str,
+) -> Result<AtomicWriteOutcome, CasrError> {
+    use std::io::Write;
+
+    // 1. Create parent directories.
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CasrError::SessionWriteError {
+            path: target_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to create parent directories: {e}"),
+        })?;
+    }
+
+    // 2. Check for existing target.
+    let backup_path = if target_path.exists() {
+        if !force {
+            return Err(CasrError::SessionConflict {
+                session_id: String::new(),
+                existing_path: target_path.to_path_buf(),
+            });
+        }
+        // Create backup with deterministic de-dupe.
+        let bak = find_backup_path(target_path);
+        debug!(
+            provider = provider_slug,
+            phase = "backup_existing",
+            "backing up existing file"
+        );
+        #[cfg(test)]
+        maybe_inject_atomic_write_failure(AtomicWriteFailStage::BackupRename).map_err(|e| {
+            CasrError::SessionWriteError {
+                path: target_path.to_path_buf(),
+                provider: provider_slug.to_string(),
+                detail: format!("failed to create backup: {e}"),
+            }
+        })?;
+        std::fs::rename(target_path, &bak).map_err(|e| CasrError::SessionWriteError {
+            path: target_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to create backup: {e}"),
+        })?;
+        Some(bak)
+    } else {
+        None
+    };
+
+    // 3. Write to temp file in the same directory.
+    let temp_name = format!(".casr-tmp-{}", uuid::Uuid::new_v4().as_hyphenated());
+    let temp_path = target_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(&temp_name);
+
+    let write_result = (|| -> Result<(), std::io::Error> {
+        #[cfg(test)]
+        maybe_inject_atomic_write_failure(AtomicWriteFailStage::TempFileCreate)?;
+        let mut file = std::fs::File::create(&temp_path)?;
+        #[cfg(test)]
+        maybe_inject_atomic_write_failure(AtomicWriteFailStage::WriteAll)?;
+        file.write_all(content)?;
+        #[cfg(test)]
+        maybe_inject_atomic_write_failure(AtomicWriteFailStage::Flush)?;
+        file.flush()?;
+        #[cfg(test)]
+        maybe_inject_atomic_write_failure(AtomicWriteFailStage::SyncAll)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        // Cleanup temp file on write failure.
+        let _ = std::fs::remove_file(&temp_path);
+        // Restore backup if we made one.
+        if let Some(ref bak) = backup_path {
+            warn!(
+                provider = provider_slug,
+                phase = "write_restore",
+                "restoring backup after write failure"
+            );
+            let _ = std::fs::rename(bak, target_path);
+        }
+        return Err(CasrError::SessionWriteError {
+            path: target_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to write temp file: {e}"),
+        });
+    }
+
+    // 4. Atomic rename temp -> target.
+    #[cfg(test)]
+    maybe_wait_at_atomic_write_finalize_barrier();
+
+    #[cfg(test)]
+    if let Err(e) = maybe_inject_atomic_write_failure(AtomicWriteFailStage::FinalRename) {
+        let _ = std::fs::remove_file(&temp_path);
+        if let Some(ref bak) = backup_path {
+            warn!(
+                provider = provider_slug,
+                phase = "rename_restore",
+                "restoring backup after rename failure"
+            );
+            let _ = std::fs::rename(bak, target_path);
+        }
+        return Err(CasrError::SessionWriteError {
+            path: target_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to rename temp file to target: {e}"),
+        });
+    }
+
+    let finalize_result = if force {
+        std::fs::rename(&temp_path, target_path)
+    } else {
+        #[allow(deprecated)]
+        let managed_temp_path = tempfile::TempPath::from_path(temp_path.clone());
+        managed_temp_path
+            .persist_noclobber(target_path)
+            .map_err(|error| error.error)
+    };
+
+    if let Err(e) = finalize_result {
+        let _ = std::fs::remove_file(&temp_path);
+        if let Some(ref bak) = backup_path {
+            warn!(
+                provider = provider_slug,
+                phase = "rename_restore",
+                "restoring backup after rename failure"
+            );
+            let _ = std::fs::rename(bak, target_path);
+        }
+        if !force && e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(CasrError::SessionConflict {
+                session_id: String::new(),
+                existing_path: target_path.to_path_buf(),
+            });
+        }
+        return Err(CasrError::SessionWriteError {
+            path: target_path.to_path_buf(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to rename temp file to target: {e}"),
+        });
+    }
+
+    info!(
+        provider = provider_slug,
+        phase = "atomic_write_complete",
+        "atomic write complete"
+    );
+
+    Ok(AtomicWriteOutcome {
+        target_path: target_path.to_path_buf(),
+        temp_path,
+        backup_path,
+    })
+}
+
+/// Restore a backup after a verification failure.
+///
+/// Removes the broken target and renames the backup back into place.
+pub fn restore_backup(outcome: &AtomicWriteOutcome, provider_slug: &str) -> Result<(), CasrError> {
+    if let Some(ref bak) = outcome.backup_path {
+        warn!(
+            provider = provider_slug,
+            phase = "rollback_restore",
+            "restoring backup after verification failure"
+        );
+        let _ = std::fs::remove_file(&outcome.target_path);
+        std::fs::rename(bak, &outcome.target_path).map_err(|e| CasrError::SessionWriteError {
+            path: outcome.target_path.clone(),
+            provider: provider_slug.to_string(),
+            detail: format!("failed to restore backup: {e}"),
+        })?;
+    } else {
+        // No backup: just remove the broken target.
+        let _ = std::fs::remove_file(&outcome.target_path);
+    }
+    Ok(())
+}
+
+/// Find an available backup path, deduplicating with `.bak`, `.bak.1`, `.bak.2`, etc.
+fn find_backup_path(target: &Path) -> PathBuf {
+    let mut filename = target.file_name().unwrap_or_default().to_os_string();
+    filename.push(".bak");
+    let bak = target.with_file_name(&filename);
+    if !bak.exists() {
+        return bak;
+    }
+    for i in 1..100 {
+        let mut numbered = filename.clone();
+        numbered.push(format!(".{i}"));
+        let numbered_path = target.with_file_name(numbered);
+        if !numbered_path.exists() {
+            return numbered_path;
+        }
+    }
+    // Fallback: use random suffix.
+    let mut random = filename;
+    random.push(format!(".{}", uuid::Uuid::new_v4().as_hyphenated()));
+    target.with_file_name(random)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn tracing_macros_do_not_contain_sensitive_fields() {
+        let source = include_str!("pipeline.rs");
+        let mut in_macro = false;
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if ["info!", "debug!", "warn!", "trace!", "error!"]
+                .iter()
+                .any(|name| trimmed.starts_with(name))
+            {
+                in_macro = true;
+            }
+            if in_macro {
+                for forbidden in [
+                    "source_path =",
+                    "session_id =",
+                    "target_session_id =",
+                    "resume_command =",
+                    "path = %",
+                    "backup = %",
+                    "warn!(detail",
+                    "error = %",
+                ] {
+                    assert!(
+                        !trimmed.contains(forbidden),
+                        "sensitive tracing field: {forbidden}"
+                    );
+                }
+                if trimmed.contains(");") {
+                    in_macro = false;
+                }
+            }
+        }
+    }
+
+    fn sample_message(idx: usize, role: MessageRole, content: &str) -> CanonicalMessage {
+        CanonicalMessage {
+            idx,
+            role,
+            content: content.to_string(),
+            timestamp: Some(1_700_000_000_000 + idx as i64),
+            author: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn sample_session() -> CanonicalSession {
+        CanonicalSession {
+            session_id: "src-123".to_string(),
+            provider_slug: "codex".to_string(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            title: Some("Example".to_string()),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_010_000),
+            messages: vec![
+                sample_message(
+                    0,
+                    MessageRole::User,
+                    "Investigate parser behavior in providers/codex.rs",
+                ),
+                sample_message(
+                    1,
+                    MessageRole::Assistant,
+                    "I found a mismatch in response_item handling; I will patch it.",
+                ),
+                sample_message(
+                    2,
+                    MessageRole::User,
+                    "Please also verify resume command compatibility.",
+                ),
+            ],
+            metadata: serde_json::Value::Null,
+            source_path: PathBuf::from("/tmp/source.jsonl"),
+            model_name: Some("gpt-5-codex".to_string()),
+        }
+    }
+
+    struct MaliciousSourceProvider;
+
+    impl crate::providers::Provider for MaliciousSourceProvider {
+        fn name(&self) -> &str {
+            "Malicious Source"
+        }
+
+        fn slug(&self) -> &str {
+            "malicious-source"
+        }
+
+        fn cli_alias(&self) -> &str {
+            "src"
+        }
+
+        fn detect(&self) -> crate::discovery::DetectionResult {
+            crate::discovery::DetectionResult {
+                installed: true,
+                version: None,
+                evidence: Vec::new(),
+            }
+        }
+
+        fn session_roots(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+
+        fn owns_session(&self, _session_id: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession> {
+            Ok(CanonicalSession {
+                session_id: "..\\outside".to_string(),
+                provider_slug: self.slug().to_string(),
+                workspace: None,
+                title: Some("malicious source".to_string()),
+                started_at: None,
+                ended_at: None,
+                messages: vec![
+                    sample_message(0, MessageRole::User, "task"),
+                    sample_message(1, MessageRole::Assistant, "answer"),
+                ],
+                metadata: serde_json::Value::Null,
+                source_path: path.to_path_buf(),
+                model_name: None,
+            })
+        }
+
+        fn write_session(
+            &self,
+            _session: &CanonicalSession,
+            _opts: &WriteOptions,
+        ) -> anyhow::Result<WrittenSession> {
+            anyhow::bail!("source provider is not writable")
+        }
+
+        fn resume_command(&self, session_id: &str) -> String {
+            format!("src --resume {session_id}")
+        }
+    }
+
+    struct PathTargetProvider {
+        root: PathBuf,
+    }
+
+    impl crate::providers::Provider for PathTargetProvider {
+        fn name(&self) -> &str {
+            "Path Target"
+        }
+
+        fn slug(&self) -> &str {
+            "path-target"
+        }
+
+        fn cli_alias(&self) -> &str {
+            "dst"
+        }
+
+        fn detect(&self) -> crate::discovery::DetectionResult {
+            crate::discovery::DetectionResult {
+                installed: true,
+                version: None,
+                evidence: Vec::new(),
+            }
+        }
+
+        fn session_roots(&self) -> Vec<PathBuf> {
+            vec![self.root.clone()]
+        }
+
+        fn owns_session(&self, _session_id: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn read_session(&self, path: &Path) -> anyhow::Result<CanonicalSession> {
+            let content = std::fs::read_to_string(path)?;
+            let messages = content
+                .lines()
+                .enumerate()
+                .map(|(idx, line)| {
+                    let value: serde_json::Value = serde_json::from_str(line)?;
+                    let role = match value["role"].as_str().unwrap_or_default() {
+                        "user" => MessageRole::User,
+                        _ => MessageRole::Assistant,
+                    };
+                    Ok(sample_message(
+                        idx,
+                        role,
+                        value["content"].as_str().unwrap_or_default(),
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(CanonicalSession {
+                session_id: path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                provider_slug: self.slug().to_string(),
+                workspace: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                messages,
+                metadata: serde_json::Value::Null,
+                source_path: path.to_path_buf(),
+                model_name: None,
+            })
+        }
+
+        fn write_session(
+            &self,
+            session: &CanonicalSession,
+            opts: &WriteOptions,
+        ) -> anyhow::Result<WrittenSession> {
+            let target_path = self.root.join(format!("{}.jsonl", session.session_id));
+            let content = session
+                .messages
+                .iter()
+                .map(|message| {
+                    serde_json::json!({
+                        "role": if message.role == MessageRole::User { "user" } else { "assistant" },
+                        "content": message.content,
+                    })
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let outcome = atomic_write(&target_path, content.as_bytes(), opts.force, self.slug())?;
+            Ok(WrittenSession {
+                paths: vec![outcome.target_path.clone()],
+                session_id: session.session_id.clone(),
+                resume_command: self.resume_command(&session.session_id),
+                backup_path: outcome.backup_path.clone(),
+                rollback_paths: vec![RollbackPath::new(outcome.target_path, outcome.backup_path)],
+                warnings: Vec::new(),
+            })
+        }
+
+        fn resume_command(&self, session_id: &str) -> String {
+            format!("dst --resume {session_id}")
+        }
+    }
+
+    #[test]
+    fn conversion_replaces_untrusted_source_session_id_before_writing_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source_path = tmp.path().join("source.jsonl");
+        std::fs::write(&source_path, "fixture").expect("write source fixture");
+        let target_root = tmp.path().join("target");
+        std::fs::create_dir_all(&target_root).expect("create target root");
+
+        let pipeline = ConversionPipeline {
+            registry: ProviderRegistry::new(vec![
+                Box::new(MaliciousSourceProvider),
+                Box::new(PathTargetProvider {
+                    root: target_root.clone(),
+                }),
+            ]),
+        };
+
+        let result = pipeline
+            .convert_source_path("src", &source_path, "dst", ConvertOptions::default())
+            .expect("conversion should sanitize the source id");
+        let written = result.written.expect("conversion should write a target");
+        let target_path = written.paths.first().expect("target path");
+
+        assert!(
+            target_path.starts_with(&target_root),
+            "target path escaped provider root: {}",
+            target_path.display()
+        );
+        assert_ne!(result.canonical_session.session_id, "..\\outside");
+        assert!(
+            !result.canonical_session.session_id.contains(['/', '\\']),
+            "sanitized id still contains a path separator"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.to_ascii_lowercase().contains("session id")),
+            "conversion should explain the generated replacement id"
+        );
+        assert!(!tmp.path().join("outside.jsonl").exists());
+    }
+
+    #[test]
+    fn canonical_source_conversion_does_not_read_the_source_path_again() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source_path = tmp.path().join("source.jsonl");
+        std::fs::write(&source_path, "fixture").expect("write source fixture");
+        let target_root = tmp.path().join("target");
+        std::fs::create_dir_all(&target_root).expect("create target root");
+        let canonical = sample_session();
+
+        let pipeline = ConversionPipeline {
+            registry: ProviderRegistry::new(vec![
+                Box::new(MaliciousSourceProvider),
+                Box::new(PathTargetProvider {
+                    root: target_root.clone(),
+                }),
+            ]),
+        };
+
+        let result = pipeline
+            .convert_canonical_source_path(
+                "src",
+                &source_path,
+                canonical,
+                "dst",
+                ConvertOptions::default(),
+            )
+            .expect("conversion should use the caller's canonical source");
+
+        assert_eq!(result.canonical_session.session_id, "src-123");
+        assert_eq!(
+            result.written.expect("written target").session_id,
+            "src-123"
+        );
+    }
+
+    #[test]
+    fn cursor_readback_accepts_roles_collapsed_to_assistant() {
+        let canonical = CanonicalSession {
+            session_id: "cursor-source".to_string(),
+            provider_slug: "codex".to_string(),
+            workspace: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            messages: vec![
+                sample_message(0, MessageRole::User, "task"),
+                sample_message(1, MessageRole::System, "system context"),
+                sample_message(2, MessageRole::Tool, "tool output"),
+                sample_message(3, MessageRole::Other("notice".to_string()), "notice"),
+                sample_message(4, MessageRole::Assistant, "answer"),
+            ],
+            metadata: serde_json::Value::Null,
+            source_path: PathBuf::from("/tmp/cursor-source.jsonl"),
+            model_name: None,
+        };
+        let readback = CanonicalSession {
+            messages: vec![
+                sample_message(0, MessageRole::User, "task"),
+                sample_message(1, MessageRole::Assistant, "system context"),
+                sample_message(2, MessageRole::Assistant, "tool output"),
+                sample_message(3, MessageRole::Assistant, "notice"),
+                sample_message(4, MessageRole::Assistant, "answer"),
+            ],
+            ..canonical.clone()
+        };
+
+        assert_eq!(
+            readback_mismatch_detail("cursor", &canonical, &readback),
+            None,
+            "Cursor stores every non-user bubble as assistant"
+        );
+    }
+
+    #[test]
+    fn enrich_prepends_marked_synthetic_messages() {
+        let mut session = sample_session();
+        let original_len = session.messages.len();
+
+        let inserted = prepend_enrichment_messages(&mut session, "codex", "claude-code", "src-123");
+
+        assert_eq!(inserted, 2);
+        assert_eq!(session.messages.len(), original_len + 2);
+        assert_eq!(session.messages[0].role, MessageRole::System);
+        assert_eq!(session.messages[1].role, MessageRole::System);
+        assert!(
+            session.messages[0]
+                .content
+                .contains("[casr synthetic context]")
+        );
+        assert!(
+            session.messages[1]
+                .content
+                .contains("Recent conversation snapshot")
+        );
+        assert_eq!(
+            session.messages[0]
+                .extra
+                .get("casr_enrichment")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            session.messages[1]
+                .extra
+                .get("enrichment_type")
+                .and_then(|v| v.as_str()),
+            Some("recent_summary")
+        );
+
+        for (idx, msg) in session.messages.iter().enumerate() {
+            assert_eq!(msg.idx, idx);
+        }
+    }
+
+    #[test]
+    fn recent_summary_is_deterministic_and_compact() {
+        let mut session = sample_session();
+        session.messages.push(sample_message(
+            3,
+            MessageRole::Assistant,
+            "   This    has  extra   spacing\nand line breaks that should compact cleanly.   ",
+        ));
+
+        let (count, summary) = build_recent_summary(&session, 2, 40);
+        assert_eq!(count, 2);
+        assert!(summary.contains("- user: Please also verify resume command"));
+        assert!(summary.contains("- assistant: This has extra spacing"));
+        assert!(summary.contains("..."));
+    }
+
+    struct FailStageReset;
+
+    impl Drop for FailStageReset {
+        fn drop(&mut self) {
+            set_atomic_write_fail_stage(None);
+        }
+    }
+
+    fn with_fail_stage(stage: AtomicWriteFailStage) -> FailStageReset {
+        set_atomic_write_fail_stage(Some(stage));
+        FailStageReset
+    }
+
+    fn count_temp_artifacts(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .expect("read temp dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".casr-tmp-")
+            })
+            .count()
+    }
+
+    fn backup_artifacts_for(target: &Path) -> Vec<PathBuf> {
+        let parent = target.parent().expect("target parent");
+        let prefix = format!(
+            "{}.bak",
+            target
+                .file_name()
+                .expect("target file name")
+                .to_string_lossy()
+        );
+        fs::read_dir(parent)
+            .expect("read parent")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn atomic_write_conflict_without_force_returns_session_conflict() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("session.jsonl");
+        fs::write(&target, "existing").expect("seed target");
+
+        let err =
+            atomic_write(&target, b"new content", false, "test").expect_err("should conflict");
+        assert!(matches!(err, CasrError::SessionConflict { .. }));
+        assert_eq!(
+            fs::read_to_string(&target).expect("target should remain"),
+            "existing"
+        );
+    }
+
+    #[test]
+    fn atomic_write_concurrent_without_force_allows_exactly_one_writer() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("session.jsonl");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let writers = [b"first writer".to_vec(), b"second writer".to_vec()]
+            .into_iter()
+            .map(|content| {
+                let target = target.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    set_atomic_write_finalize_barrier(Some(barrier));
+                    let result = atomic_write(&target, &content, false, "test");
+                    set_atomic_write_finalize_barrier(None);
+                    (content, result)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut success_count = 0;
+        let mut conflict_count = 0;
+        let mut winner_content = None;
+        for writer in writers {
+            let (content, result) = writer.join().expect("writer thread should not panic");
+            match result {
+                Ok(_) => {
+                    success_count += 1;
+                    winner_content = Some(content);
+                }
+                Err(CasrError::SessionConflict { .. }) => conflict_count += 1,
+                Err(error) => panic!("unexpected concurrent write error: {error:?}"),
+            }
+        }
+
+        assert_eq!(success_count, 1, "exactly one writer should succeed");
+        assert_eq!(conflict_count, 1, "the losing writer should conflict");
+        assert_eq!(
+            fs::read(&target).expect("winner content should remain"),
+            winner_content.expect("a writer should win")
+        );
+        assert_eq!(count_temp_artifacts(tmp.path()), 0);
+    }
+
+    #[test]
+    fn atomic_write_failure_matrix_restores_backup_and_cleans_temp_files() {
+        for stage in [
+            AtomicWriteFailStage::TempFileCreate,
+            AtomicWriteFailStage::WriteAll,
+            AtomicWriteFailStage::Flush,
+            AtomicWriteFailStage::SyncAll,
+            AtomicWriteFailStage::FinalRename,
+        ] {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let target = tmp.path().join("session.jsonl");
+            fs::write(&target, "original").expect("seed target");
+
+            let _reset = with_fail_stage(stage);
+            let err =
+                atomic_write(&target, b"new content", true, "test").expect_err("expected failure");
+            assert!(
+                matches!(err, CasrError::SessionWriteError { .. }),
+                "expected SessionWriteError for stage {stage:?}, got {err:?}"
+            );
+
+            assert_eq!(
+                fs::read_to_string(&target).expect("target should be restored"),
+                "original",
+                "original content should be restored for stage {stage:?}"
+            );
+            assert_eq!(
+                count_temp_artifacts(tmp.path()),
+                0,
+                "no temp artifacts should remain for stage {stage:?}"
+            );
+            assert!(
+                backup_artifacts_for(&target).is_empty(),
+                "backup artifacts should not remain for stage {stage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_write_backup_creation_failure_preserves_original_target() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("session.jsonl");
+        fs::write(&target, "original").expect("seed target");
+
+        let _reset = with_fail_stage(AtomicWriteFailStage::BackupRename);
+        let err =
+            atomic_write(&target, b"new content", true, "test").expect_err("expected failure");
+        let CasrError::SessionWriteError { detail, .. } = err else {
+            panic!("expected SessionWriteError, got {err:?}");
+        };
+        assert!(
+            detail.contains("failed to create backup"),
+            "unexpected detail: {detail}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&target).expect("target should remain"),
+            "original"
+        );
+        assert_eq!(count_temp_artifacts(tmp.path()), 0);
+        assert!(backup_artifacts_for(&target).is_empty());
+    }
+
+    #[test]
+    fn atomic_write_success_force_creates_backup_and_restore_backup_recovers_original() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("session.jsonl");
+        fs::write(&target, "original").expect("seed target");
+
+        let outcome = atomic_write(&target, b"new content", true, "test")
+            .expect("force write should succeed");
+        assert_eq!(
+            fs::read_to_string(&target).expect("target should contain new content"),
+            "new content"
+        );
+        assert!(
+            !outcome.temp_path.exists(),
+            "temp file should be renamed away"
+        );
+
+        let backup = outcome.backup_path.as_ref().expect("backup should exist");
+        assert_eq!(
+            fs::read_to_string(backup).expect("backup should contain original"),
+            "original"
+        );
+
+        restore_backup(&outcome, "test").expect("restore should succeed");
+        assert_eq!(
+            fs::read_to_string(&target).expect("target should be restored"),
+            "original"
+        );
+        assert!(!backup.exists(), "backup should be consumed during restore");
+    }
+
+    #[test]
+    fn restore_backup_without_backup_removes_target() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("session.jsonl");
+
+        let outcome = atomic_write(&target, b"fresh content", false, "test")
+            .expect("initial write should succeed");
+        assert!(target.exists(), "target should exist after write");
+        assert!(outcome.backup_path.is_none(), "no backup expected");
+
+        restore_backup(&outcome, "test").expect("restore should succeed without backup");
+        assert!(
+            !target.exists(),
+            "target should be removed when no backup is available"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_backups_for_every_written_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let first = tmp.path().join("updates.jsonl");
+        let second = tmp.path().join("summary.json");
+        fs::write(&first, "old updates").expect("seed first");
+        fs::write(&second, "old summary").expect("seed second");
+
+        let first_outcome =
+            atomic_write(&first, b"new updates", true, "test").expect("force-write first");
+        let second_outcome =
+            atomic_write(&second, b"new summary", true, "test").expect("force-write second");
+        let written = WrittenSession {
+            paths: vec![first.clone(), second.clone()],
+            session_id: "session".to_string(),
+            resume_command: "test resume session".to_string(),
+            backup_path: first_outcome.backup_path.clone(),
+            rollback_paths: vec![
+                RollbackPath::new(first.clone(), first_outcome.backup_path.clone()),
+                RollbackPath::new(second.clone(), second_outcome.backup_path.clone()),
+            ],
+            warnings: Vec::new(),
+        };
+
+        rollback_written_session("test", &written).expect("rollback should restore all files");
+
+        assert_eq!(
+            fs::read_to_string(&first).expect("first restored"),
+            "old updates"
+        );
+        assert_eq!(
+            fs::read_to_string(&second).expect("second restored"),
+            "old summary"
+        );
+        assert!(
+            second_outcome
+                .backup_path
+                .as_ref()
+                .is_some_and(|backup| !backup.exists()),
+            "all consumed backups should be removed"
+        );
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_alongside_original_write_error() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let blocked_target = tmp.path().join("blocked");
+        fs::create_dir(&blocked_target).expect("create blocked target directory");
+
+        let error = rollback_after_write_error(
+            "test",
+            anyhow::anyhow!("write failed"),
+            &[RollbackPath::new(blocked_target, None)],
+        );
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("write failed"));
+        assert!(rendered.contains("rollback failed"));
+    }
+
+    #[test]
+    fn sqlite_snapshot_rollback_restores_database_and_removes_wal_sidecars() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db_path).expect("open database");
+        conn.execute_batch(
+            "CREATE TABLE marker (value TEXT NOT NULL); INSERT INTO marker VALUES ('before');",
+        )
+        .expect("seed database");
+        drop(conn);
+
+        let backup_path = backup_sqlite_database(&db_path, "test")
+            .expect("snapshot should succeed")
+            .expect("existing database should have a snapshot");
+        let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+        fs::write(&wal_path, b"stale wal sidecar").expect("seed wal sidecar");
+        fs::write(&shm_path, b"stale shm sidecar").expect("seed shm sidecar");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen database");
+        conn.execute("UPDATE marker SET value = 'after'", [])
+            .expect("mutate database");
+        drop(conn);
+
+        rollback_write_paths(
+            "test",
+            &[
+                RollbackPath::new(db_path.clone(), Some(backup_path.clone())),
+                RollbackPath::new(wal_path.clone(), None),
+                RollbackPath::new(shm_path.clone(), None),
+            ],
+        )
+        .expect("rollback should restore snapshot");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open restored database");
+        let marker: String = conn
+            .query_row("SELECT value FROM marker", [], |row| row.get(0))
+            .expect("read restored marker");
+        assert_eq!(marker, "before");
+        assert!(!backup_path.exists(), "snapshot should be consumed");
+        assert!(!wal_path.exists(), "wal sidecar should be removed");
+        assert!(!shm_path.exists(), "shm sidecar should be removed");
+    }
+
+    #[test]
+    fn sqlite_snapshot_is_consumed_after_successful_verification() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let backup = tmp.path().join("state.vscdb.bak");
+        fs::write(&backup, b"snapshot").expect("seed snapshot");
+        let target = tmp.path().join("state.vscdb");
+        let mut written = WrittenSession {
+            paths: vec![target.clone()],
+            session_id: "session".to_string(),
+            resume_command: "cursor .".to_string(),
+            backup_path: Some(backup.clone()),
+            rollback_paths: sqlite_rollback_paths(&target, Some(backup.clone())),
+            warnings: Vec::new(),
+        };
+        let mut warnings = Vec::new();
+
+        cleanup_sqlite_snapshot("cursor", &mut written, &mut warnings);
+
+        assert!(!backup.exists(), "verified snapshot should be deleted");
+        assert!(written.backup_path.is_none());
+        assert!(
+            written
+                .rollback_paths
+                .iter()
+                .all(|entry| entry.backup_path.is_none())
+        );
+        assert!(warnings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Context budget regression tests
+    // -----------------------------------------------------------------------
+
+    fn budget_msg(role: MessageRole, content: &str) -> CanonicalMessage {
+        CanonicalMessage {
+            idx: 0,
+            role,
+            content: content.to_string(),
+            timestamp: None,
+            author: None,
+            tool_calls: vec![],
+            tool_results: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn budget_session(messages: Vec<CanonicalMessage>) -> CanonicalSession {
+        CanonicalSession {
+            session_id: "s".into(),
+            provider_slug: "codex".into(),
+            workspace: None,
+            title: None,
+            started_at: None,
+            ended_at: None,
+            messages,
+            metadata: serde_json::Value::Null,
+            source_path: PathBuf::from("/tmp/x"),
+            model_name: None,
+        }
+    }
+
+    #[test]
+    fn budget_elide_middle_only_truncates_long_strings() {
+        assert!(elide_middle("short", 100).is_none(), "no truncation needed");
+        let long = "x".repeat(1000);
+        let out = elide_middle(&long, 100).expect("should truncate");
+        assert!(out.chars().count() < 250, "output should be much shorter");
+        assert!(out.contains("elided"), "should contain elision marker");
+    }
+
+    #[test]
+    fn budget_drops_reasoning_and_truncates_tool_output() {
+        use crate::model::{ToolCall, ToolResult};
+
+        let mut reasoning = budget_msg(MessageRole::Assistant, "secret thoughts");
+        reasoning.author = Some("reasoning".into());
+
+        let mut call = budget_msg(MessageRole::Assistant, "run it");
+        call.tool_calls.push(ToolCall {
+            id: Some("c1".into()),
+            name: "Bash".into(),
+            arguments: serde_json::json!({"cmd": "ls"}),
+        });
+
+        let mut tool = budget_msg(MessageRole::Tool, "");
+        tool.tool_results.push(ToolResult {
+            call_id: Some("c1".into()),
+            content: "y".repeat(50_000),
+            is_error: false,
+        });
+
+        let task = budget_msg(MessageRole::User, "task");
+        let mut s = budget_session(vec![task, call, tool, reasoning]);
+
+        let warns = apply_context_budget(&mut s, 0, 4000, false);
+
+        // Reasoning was dropped.
+        assert!(
+            !s.messages
+                .iter()
+                .any(|m| m.author.as_deref() == Some("reasoning")),
+            "reasoning trace should be gone"
+        );
+
+        // Tool output was truncated.
+        let tr_content = &s
+            .messages
+            .iter()
+            .find(|m| !m.tool_results.is_empty())
+            .expect("tool result message kept")
+            .tool_results[0]
+            .content;
+        assert!(
+            tr_content.chars().count() < 5000,
+            "tool output should be truncated"
+        );
+
+        // Warnings were emitted.
+        assert!(
+            warns.iter().any(|w| w.contains("reasoning")),
+            "should warn about dropped reasoning"
+        );
+        assert!(
+            warns.iter().any(|w| w.contains("Truncated")),
+            "should warn about truncated tool output"
+        );
+    }
+
+    #[test]
+    fn budget_token_cap_drops_oldest_keeps_task_and_recent() {
+        let mut msgs = vec![budget_msg(MessageRole::User, "the original task")];
+        for i in 0..50 {
+            let role = if i % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            msgs.push(budget_msg(role, &"word ".repeat(500)));
+        }
+        msgs.push(budget_msg(MessageRole::Assistant, "FINAL RECENT MESSAGE"));
+        let before = msgs.len();
+        let mut s = budget_session(msgs);
+
+        let warns = apply_context_budget(&mut s, 2000, 0, true);
+
+        assert!(s.messages.len() < before, "older turns should be dropped");
+        assert_eq!(
+            s.messages.first().unwrap().content,
+            "the original task",
+            "first (task) message must be pinned"
+        );
+        assert_eq!(
+            s.messages.last().unwrap().content,
+            "FINAL RECENT MESSAGE",
+            "most recent message must be retained"
+        );
+        assert!(
+            warns.iter().any(|w| w.contains("Context budget")),
+            "should emit context-budget warning"
+        );
+    }
+
+    #[test]
+    fn budget_repairs_orphaned_tool_use_after_dropping() {
+        use crate::model::ToolCall;
+
+        let mut call = budget_msg(MessageRole::Assistant, "");
+        call.tool_calls.push(ToolCall {
+            id: Some("orphan".into()),
+            name: "X".into(),
+            arguments: serde_json::Value::Null,
+        });
+        // No matching tool_result — the tool call is already orphaned.
+        let mut s = budget_session(vec![budget_msg(MessageRole::User, "hi"), call]);
+
+        apply_context_budget(&mut s, 0, 0, true);
+
+        // Orphaned tool_use removed; now-empty assistant turn also dropped.
+        assert!(
+            s.messages.iter().all(|m| m.tool_calls.is_empty()),
+            "orphaned tool_use should be stripped"
+        );
+        assert_eq!(
+            s.messages.len(),
+            1,
+            "empty assistant turn should be dropped"
+        );
+    }
+}

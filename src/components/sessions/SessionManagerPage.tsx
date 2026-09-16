@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ArrowRightLeft,
   Copy,
   RefreshCw,
   Search,
@@ -60,6 +61,7 @@ import { isMac } from "@/lib/platform";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { SessionItem } from "./SessionItem";
 import { SessionMessageItem } from "./SessionMessageItem";
+import { SessionTransferDialog } from "./SessionTransferDialog";
 import { SessionTocDialog, SessionTocSidebar } from "./SessionToc";
 import {
   extractCodexPromptPreview,
@@ -84,14 +86,49 @@ const SESSION_GROUP_EXPANSION_STORAGE_KEY =
 
 type ProviderFilter =
   | "all"
-  | "codex"
-  | "grokbuild"
   | "claude"
-  | "opencode"
-  | "openclaw"
+  | "codex"
   | "gemini"
+  | "antigravity"
+  | "cursor"
+  | "cline"
+  | "aider"
+  | "amp"
+  | "opencode"
+  | "chatgpt"
+  | "clawdbot"
+  | "vibe"
+  | "factory"
+  | "openclaw"
   | "hermes"
-  | "pi";
+  | "pi"
+  | "kiro"
+  | "grokbuild";
+
+const SESSION_PROVIDER_FILTERS: ReadonlyArray<{
+  id: Exclude<ProviderFilter, "all">;
+  label: string;
+  icon: string;
+}> = [
+  { id: "claude", label: "Claude Code", icon: "claude" },
+  { id: "codex", label: "Codex", icon: "openai" },
+  { id: "gemini", label: "Gemini CLI", icon: "gemini" },
+  { id: "antigravity", label: "Antigravity CLI", icon: "antigravity" },
+  { id: "cursor", label: "Cursor", icon: "cursor" },
+  { id: "cline", label: "Cline", icon: "cline" },
+  { id: "aider", label: "Aider", icon: "aider" },
+  { id: "amp", label: "Amp", icon: "amp" },
+  { id: "opencode", label: "OpenCode", icon: "opencode" },
+  { id: "chatgpt", label: "ChatGPT", icon: "openai" },
+  { id: "clawdbot", label: "ClawdBot", icon: "clawdbot" },
+  { id: "vibe", label: "Vibe", icon: "vibe" },
+  { id: "factory", label: "Factory", icon: "factory" },
+  { id: "openclaw", label: "OpenClaw", icon: "openclaw" },
+  { id: "pi", label: "Pi-Agent", icon: "pi" },
+  { id: "kiro", label: "Kiro CLI", icon: "kiro" },
+  { id: "grokbuild", label: "Grok Build", icon: "grok" },
+  { id: "hermes", label: "Hermes", icon: "hermes" },
+];
 
 type SessionListViewMode = "flat" | "grouped";
 
@@ -210,6 +247,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   const [deleteTargets, setDeleteTargets] = useState<SessionMeta[] | null>(
     null,
   );
+  const [transferSession, setTransferSession] = useState<SessionMeta | null>(
+    null,
+  );
   const [selectedSessionKeys, setSelectedSessionKeys] = useState<Set<string>>(
     () => new Set(),
   );
@@ -236,7 +276,12 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   >(() => initialGroupExpansionState.expandedDirectoryKeys);
 
   useEffect(() => {
-    setProviderFilter(appId as ProviderFilter);
+    const nextFilter =
+      appId === "all" ||
+      SESSION_PROVIDER_FILTERS.some((provider) => provider.id === appId)
+        ? (appId as ProviderFilter)
+        : "all";
+    setProviderFilter(nextFilter);
   }, [appId]);
 
   // 使用 FlexSearch 全文搜索
@@ -1112,72 +1157,18 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                 </span>
                               </div>
                             </SelectItem>
-                            <SelectItem value="codex">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="openai"
-                                  name="codex"
-                                  size={14}
-                                />
-                                <span>Codex</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="grokbuild">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="grok"
-                                  name="grokbuild"
-                                  size={14}
-                                />
-                                <span>Grok Build</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="claude">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="claude"
-                                  name="claude"
-                                  size={14}
-                                />
-                                <span>Claude Code</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="opencode">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="opencode"
-                                  name="opencode"
-                                  size={14}
-                                />
-                                <span>OpenCode</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="openclaw">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="openclaw"
-                                  name="openclaw"
-                                  size={14}
-                                />
-                                <span>OpenClaw</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="gemini">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon
-                                  icon="gemini"
-                                  name="gemini"
-                                  size={14}
-                                />
-                                <span>Gemini CLI</span>
-                              </div>
-                            </SelectItem>
-                            <SelectItem value="pi">
-                              <div className="flex items-center gap-2">
-                                <ProviderIcon icon="pi" name="pi" size={14} />
-                                <span>Pi</span>
-                              </div>
-                            </SelectItem>
+                            {SESSION_PROVIDER_FILTERS.map((provider) => (
+                              <SelectItem key={provider.id} value={provider.id}>
+                                <div className="flex items-center gap-2">
+                                  <ProviderIcon
+                                    icon={provider.icon}
+                                    name={provider.id}
+                                    size={14}
+                                  />
+                                  <span>{provider.label}</span>
+                                </div>
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
 
@@ -1600,6 +1591,38 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                           <TooltipTrigger asChild>
                             <Button
                               size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              aria-label={t("sessionManager.transferAction", {
+                                defaultValue: "转换并写回会话",
+                              })}
+                              onClick={() =>
+                                setTransferSession(selectedSession)
+                              }
+                              disabled={!selectedSession.sourcePath}
+                            >
+                              <ArrowRightLeft className="size-3.5" />
+                              <span className="hidden sm:inline">
+                                {t("sessionManager.transferAction", {
+                                  defaultValue: "转换并写回会话",
+                                })}
+                              </span>
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {selectedSession.sourcePath
+                              ? t("sessionManager.transferActionTooltip", {
+                                  defaultValue: "将此会话转换并写回另一个工具",
+                                })
+                              : t("sessionManager.noTransferSource", {
+                                  defaultValue: "此会话没有可读的源文件",
+                                })}
+                          </TooltipContent>
+                        </Tooltip>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              size="sm"
                               variant="destructive"
                               className="gap-1.5"
                               onClick={() =>
@@ -1796,6 +1819,16 @@ export function SessionManagerPage({ appId }: { appId: string }) {
           if (!isDeleting) {
             setDeleteTargets(null);
           }
+        }}
+      />
+      <SessionTransferDialog
+        open={Boolean(transferSession)}
+        session={transferSession}
+        onOpenChange={(open) => {
+          if (!open) setTransferSession(null);
+        }}
+        onTransferred={() => {
+          void queryClient.invalidateQueries({ queryKey: ["sessions"] });
         }}
       />
     </TooltipProvider>

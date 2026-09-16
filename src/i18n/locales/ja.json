@@ -367,6 +367,59 @@
         "running": "実行中",
         "stopped": "停止中"
       },
+      "cursor": {
+        "title": "Cursor ローカル連携",
+        "description": "Cursor のユーザーレベルプロキシ、CA 信頼、復元可能なライフサイクルを管理します",
+        "integrationState": "連携状態",
+        "caState": "CA 状態",
+        "proxyAddress": "プロキシアドレス",
+        "proxyUnavailable": "ローカルプロキシは実行されていません",
+        "transparentActive": "透過エントリ稼働中: {{addresses}}",
+        "transparentInactive": "透過エントリは停止しています",
+        "hostsManaged": "可逆な CC2CX Hosts ブロックを適用済み",
+        "hostsUnmanaged": "システム Hosts は未管理です",
+        "backupPresent": "settings の復元バックアップがあります。停止または復旧時に削除されます",
+        "backupAbsent": "復元待ちの settings バックアップはありません",
+        "backendHealth": "Backend の健全性",
+        "backendError": "最新のエラーコード: {{code}}",
+        "backendHealthStates": {
+          "not_required": "不要",
+          "not_observed": "未観測",
+          "healthy": "正常",
+          "auth_failed": "認証失敗",
+          "timeout": "タイムアウト",
+          "transport_failed": "転送失敗",
+          "protocol_failed": "プロトコル失敗",
+          "failed": "失敗"
+        },
+        "untrustedHint": "CA はまだ信頼されていません。連携の開始時には自動インストールされません。「CA をインストール」をクリックし、システムの確認後に Cursor を使用してください。",
+        "hostsElevationHint": "開始時に api2/api3.cursor.sh をシステム Hosts へ書き込み、各 fake-IP の 443 で待ち受けます。書き込み権限がない場合は失敗して停止し、別の Hosts ファイルは変更しません。",
+        "installCommand": "明示的なインストールコマンド",
+        "refresh": "Cursor 連携状態を更新",
+        "start": "連携を開始",
+        "stop": "連携を停止",
+        "initializeCa": "CA を初期化",
+        "installCa": "CA をインストール",
+        "uninstallCa": "CA をアンインストール",
+        "initializeSuccess": "Cursor CA を初期化しました",
+        "installSuccess": "Cursor CA をインストールしました",
+        "uninstallSuccess": "Cursor CA をアンインストールしました",
+        "startSuccess": "Cursor 連携を開始しました",
+        "stopSuccess": "Cursor 連携を停止しました",
+        "states": {
+          "disabled": "未起動",
+          "starting": "起動中",
+          "running": "実行中",
+          "degraded": "縮退",
+          "stopping": "停止中"
+        },
+        "caStates": {
+          "missing": "未初期化",
+          "invalid": "無効",
+          "untrusted": "未信頼",
+          "ready": "信頼済み"
+        }
+      },
       "connectivityCheck": {
         "title": "接続チェック設定",
         "description": "プロバイダー接続チェックのタイムアウト、リトライ、低速判定しきい値を設定"

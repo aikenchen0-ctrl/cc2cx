@@ -1,25 +1,48 @@
 # Cursor 透明入口接管设计
 
-状态：设计已批准，待实现计划
+状态：设计已批准；入口模式在 2026-09-09 按参考实现与真实窗口证据做了互斥修正
 
 ## 目标
 
-让真实 Cursor 将绕过 `http.proxy` 的 AI 网络连接导入 cc2cx：
+透明入口只解决一类问题：Cursor 有些 AI 连接**不走** `http.proxy`。它不是显式 MITM 的加强版，也不能和显式代理叠在同一场验收里。
 
 ```text
+模式 T（透明，本设计）
 Cursor NodeService
-  -> 受控域名解析/Hosts
+  -> 受控 Hosts（无 http.proxy、无 --proxy-server）
   -> loopback fake-IP:443
   -> 透明 TLS 终止
-  -> HTTP/2/Connect 请求
+  -> HTTP/2/Connect
   -> 现有 Cursor backend
-  -> 当前数据库 Provider endpoint/key
+  -> 当前数据库 Provider
+
+模式 P（显式代理，cursor-byok 路径，已有 mitm.rs）
+Cursor settings http.proxy + disableHttp2
+  以及可选 --proxy-server
+  -> 本机 hudsucker MITM
+  -> 白名单改写到同一 backend
 ```
+
+## 入口互斥（2026-09-09 修正）
+
+参考：
+
+- `cursor-byok` 只写 `http.proxy` / `disableHttp2` / `systemCertificatesV2`，**不改 Hosts**。
+- `cursor-fake` 只做 DNS/fake-IP/TCP 透传，**不解密、不写 http.proxy**。
+- `go-mitmproxy` 文档写明是显式代理，不是透明代理。
+
+因此：
+
+1. 证明模式 P：必须**不写**系统 Hosts。Hosts 会把 `api2.cursor.sh` 解析成 `127.0.0.2`，MITM 若旁路官方地址会连回自己。
+2. 证明模式 T：必须**不写** `http.proxy`，也不得用 `--proxy-server` 启动 Cursor。否则 Agent `Run` 走 MITM，透明 `:443` 上的连接不能当作接管证据。
+3. Harness 可以同时具备两套代码，但一次 `start()` / 一场 E2E 只能启用一种入口。把两套同时打开不是覆盖更全，是互相污染。
+4. 2026-09-09 隔离窗口里 `transportHost=api2.cursor.sh` 且进程带 `--proxy-server`，复现的 HTTP 408 属于模式 P，不能写成模式 T 失败。
 
 ## 非目标
 
 - 不接管非 Cursor 域名。
 - 不把未知协议降级为任意 Provider 请求。
+- 不在同一运行实例里用 Hosts 给 MITM 提供“官方上游 IP”。fake-IP 表只保存 hostname ↔ loopback，不做 cursor-fake 那种 fake→real 透传。
 
 ## 组件
 
@@ -34,7 +57,7 @@ Cursor NodeService
 ### Fake-IP 映射器
 
 - 从受控地址池分配 loopback 地址，例如 `127.0.0.2` 起的连续范围。
-- 保存 `fake_ip -> hostname` 和 `hostname -> upstream candidates` 映射。
+- 只保存 `fake_ip ↔ hostname`。不保存、不拨官方上游 IP；模式 T 在本机终止 TLS，不透传到 `api2.cursor.sh` 的真实地址。
 - 映射只在透明入口运行期间有效，不持久化用户凭据。
 - 未命中映射的连接立即关闭并记录脱敏原因。
 
@@ -56,14 +79,23 @@ Cursor NodeService
 
 ## 生命周期与回滚
 
+模式 T：
+
 1. 检查 CA 完整性和当前用户信任状态。
 2. 检查 fake-IP/443 监听能力；不满足则不改 Hosts。
 3. 写入 Hosts 标记块并保存事务备份。
 4. 启动透明 listener 和本地 backend。
-5. 执行无请求体 preflight；失败则停止 listener、恢复 Hosts、释放映射。
-6. 运行期间持续暴露入口、backend、Provider 健康状态。
-7. 停止时先阻止新连接，再等待流式请求退出，最后恢复 Hosts 和 settings。
-8. 崩溃恢复只处理 CC2CX 自己留下的事务备份，不覆盖用户后续修改。
+5. **不**启动给 Cursor 用的显式 HTTP 代理，**不**写入 `http.proxy` / `--proxy-server`。
+6. 执行无请求体 preflight；失败则停止 listener、恢复 Hosts、释放映射。
+7. 停止时先停透明入口，再恢复 Hosts。
+
+模式 P：
+
+1. 检查 CA。
+2. 启动 backend 与显式 MITM。
+3. 写入可逆 settings：`http.proxy`、`http.proxySupport=on`、`cursor.general.disableHttp2=true`（与 cursor-byok 一致）。
+4. **不**写系统 Hosts，**不**绑定 fake-IP `:443`。
+5. 失败则停代理并恢复 settings。
 
 ## 安全边界
 
@@ -86,11 +118,21 @@ Cursor NodeService
 
 ### 真实 Cursor 验收
 
-- 启动参数和 profile 可唯一识别。
-- NodeService 不再直接连接外部 Cursor AI 443，而是连接 loopback fake-IP/443。
-- Cursor `Auto` 或合法自定义模型请求在 cc2cx backend 日志中出现。
-- backend 的 Provider 证据显示请求命中当前配置 endpoint；日志不泄露认证值。
-- 停止接入后默认 Cursor settings、Hosts 和证书状态可验证恢复。
+模式必须写进记录，不可混报。
+
+模式 T：
+
+- 启动参数**没有** `--proxy-server`，settings **没有** `http.proxy`。
+- NodeService 已建立连接到 loopback fake-IP `:443`（例如 `127.0.0.2:443`），而不是 `127.0.0.1:<mitm>`。
+- backend 出现 `AgentService/Run` 或等价路径，且 Provider health 不是 `not_observed`。
+
+模式 P：
+
+- 启动可有 `--proxy-server` / `http.proxy`。
+- **没有** CC2CX Hosts 块。
+- NodeService 连接到本机 MITM 端口；backend 同样要有 Agent 路径和 Provider 证据。
+
+两种模式都要求：日志不含凭证或提示词正文；停止后 Hosts/settings 按该模式回滚。Cursor `Auto` 官方回复不能当作接管证据。
 
 ## 实现顺序
 
@@ -98,5 +140,5 @@ Cursor NodeService
 2. 增加透明 TLS listener 的最小握手测试。
 3. 将解密后的 HTTP/2 流接入现有 Cursor 路由，不复制 Provider 逻辑。
 4. 加入生命周期、回滚和故障注入测试。
-5. 在隔离 Cursor profile 上进行真实 E2E。
+5. 在隔离 Cursor profile 上按**单一入口模式**做 E2E：模式 T 不用代理启动；模式 P 不写 Hosts。禁止用「Hosts + --proxy-server」同时开着的窗口宣称透明入口已验收。
 6. 只有真实入口证据稳定后，才评估默认 profile 的可选启用。

@@ -367,6 +367,59 @@
         "running": "运行中",
         "stopped": "已停止"
       },
+      "cursor": {
+        "title": "Cursor 本机接入",
+        "description": "为 Cursor 管理用户级代理、CA 信任和可恢复的启停流程",
+        "integrationState": "接入状态",
+        "caState": "CA 状态",
+        "proxyAddress": "代理地址",
+        "proxyUnavailable": "本机代理未运行",
+        "transparentActive": "透明入口运行中：{{addresses}}",
+        "transparentInactive": "透明入口未运行",
+        "hostsManaged": "已写入可回滚的 CC2CX Hosts 标记块",
+        "hostsUnmanaged": "未托管系统 Hosts",
+        "backupPresent": "检测到 settings 恢复备份，停止或恢复后会清理",
+        "backupAbsent": "没有待恢复的 settings 备份",
+        "backendHealth": "Backend 健康状态",
+        "backendError": "最近错误代码：{{code}}",
+        "backendHealthStates": {
+          "not_required": "无需上游",
+          "not_observed": "尚未请求",
+          "healthy": "正常",
+          "auth_failed": "认证失败",
+          "timeout": "超时",
+          "transport_failed": "传输失败",
+          "protocol_failed": "协议失败",
+          "failed": "失败"
+        },
+        "untrustedHint": "当前 CA 尚未受系统信任。启动不会自动安装；请点击“安装 CA”，按系统提示确认后再使用 Cursor。",
+        "hostsElevationHint": "启动会把 api2/api3.cursor.sh 写入系统 Hosts 并在每个 fake-IP 的 443 端口监听。没有写权限时会直接失败，不会改其它 Hosts 文件。",
+        "installCommand": "显式安装命令",
+        "refresh": "刷新 Cursor 接入状态",
+        "start": "启动接入",
+        "stop": "停止接入",
+        "initializeCa": "初始化 CA",
+        "installCa": "安装 CA",
+        "uninstallCa": "卸载 CA",
+        "initializeSuccess": "Cursor CA 已初始化",
+        "installSuccess": "Cursor CA 已安装",
+        "uninstallSuccess": "Cursor CA 已卸载",
+        "startSuccess": "Cursor 接入已启动",
+        "stopSuccess": "Cursor 接入已停止",
+        "states": {
+          "disabled": "未启动",
+          "starting": "启动中",
+          "running": "运行中",
+          "degraded": "降级",
+          "stopping": "停止中"
+        },
+        "caStates": {
+          "missing": "未初始化",
+          "invalid": "无效",
+          "untrusted": "未信任",
+          "ready": "已信任"
+        }
+      },
       "connectivityCheck": {
         "title": "连通检测配置",
         "description": "配置供应商地址探测的超时、重试和较慢阈值"

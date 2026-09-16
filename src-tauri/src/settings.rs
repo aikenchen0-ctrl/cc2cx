@@ -1052,6 +1052,33 @@ pub fn get_effective_current_provider(
     db.get_current_provider(app_type.as_str())
 }
 
+/// 获取有效的当前供应商 ID，但绝不修改设备级 settings。
+///
+/// 这是只读调用方（例如 Cursor provider factory）应使用的解析入口：本地 settings
+/// 中的 ID 仍优先于数据库 `is_current`，但 stale ID 只会回退到数据库，不会被清理。
+/// 需要执行历史自动修复的 UI/迁移流程才应调用 [`get_effective_current_provider`]。
+pub fn get_effective_current_provider_readonly(
+    db: &crate::database::Database,
+    app_type: &AppType,
+) -> Result<Option<String>, AppError> {
+    if let Some(local_id) = get_current_provider(app_type) {
+        if db
+            .get_provider_by_id(&local_id, app_type.as_str())?
+            .is_some()
+        {
+            return Ok(Some(local_id));
+        }
+
+        log::warn!(
+            "本地 settings 中的供应商 {} ({}) 在数据库中不存在，只读解析将保留 settings 并 fallback 到数据库",
+            local_id,
+            app_type.as_str()
+        );
+    }
+
+    db.get_current_provider(app_type.as_str())
+}
+
 // ===== Skill 同步方式管理函数 =====
 
 /// 获取 Skill 同步方式配置

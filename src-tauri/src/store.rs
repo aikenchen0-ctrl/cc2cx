@@ -1,3 +1,4 @@
+use crate::cursor::harness::CursorHarness;
 use crate::database::Database;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::{ProxyService, UsageCache};
@@ -12,6 +13,7 @@ pub struct AppState {
     // 内部已使用细粒度锁（accounts/access_tokens/refresh_locks），所有方法均为
     // `&self`，无需外层 RwLock；避免持有粗粒度锁跨网络刷新导致的连锁阻塞。
     pub codex_oauth_manager: Arc<CodexOAuthManager>,
+    pub cursor_harness: CursorHarness,
 }
 
 impl AppState {
@@ -21,12 +23,14 @@ impl AppState {
             Arc::new(CodexOAuthManager::new(crate::config::get_app_config_dir()));
         let proxy_service =
             ProxyService::new_with_codex_oauth_manager(db.clone(), codex_oauth_manager.clone());
+        let cursor_harness = CursorHarness::default_for_current_user_with_database(db.clone());
 
         Self {
             db,
             proxy_service,
             usage_cache: Arc::new(UsageCache::new()),
             codex_oauth_manager,
+            cursor_harness,
         }
     }
 }

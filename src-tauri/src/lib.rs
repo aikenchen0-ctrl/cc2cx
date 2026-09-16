@@ -33,6 +33,7 @@ mod provider;
 mod proxy;
 mod services;
 mod session_manager;
+pub mod session_transfer;
 mod settings;
 mod store;
 
@@ -1623,6 +1624,9 @@ pub fn run() {
             commands::delete_session,
             commands::delete_sessions,
             commands::launch_session_terminal,
+            commands::list_session_transfer_targets,
+            commands::transfer_session,
+            commands::launch_transferred_session,
             commands::get_tool_versions,
             commands::run_tool_lifecycle_action,
             commands::probe_tool_installations,

@@ -1038,7 +1038,7 @@ where
             let _ = tokio::fs::remove_file(destination).await;
             return Err(error);
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1121,7 +1121,7 @@ fn windows_app_package_installed(agent_id: &str) -> bool {
     };
     let mut command = std::process::Command::new("powershell");
     command
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(CREATE_NO_WINDOW);
     command
         .output()
@@ -2110,7 +2110,7 @@ pub async fn run_agent_install(
         return Err(error);
     }
     if matches!(tool, "codex" | "claude" | "opencode" | "dsh")
-        && !node_runtime_meets_requirement().is_some()
+        && node_runtime_meets_requirement().is_none()
     {
         let runtime = ensure_node_runtime(app.clone()).await?;
         if !runtime.available {
@@ -2163,7 +2163,7 @@ pub async fn launch_agent(agent_id: String) -> Result<(), String> {
         .ok_or_else(|| format!("{agent_id} 没有可用启动命令"))?;
     #[cfg(target_os = "windows")]
     {
-        return launch_agent_with_environment(tool);
+        launch_agent_with_environment(tool)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2290,6 +2290,7 @@ fn emit_agent_install_progress(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_agent_install_progress_detail(
     app: &AppHandle,
     agent_id: &str,
@@ -2446,18 +2447,14 @@ fn run_agent_install_with_output_inner(
     let (sender, receiver) = mpsc::channel();
     let stdout_sender = sender.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if let Ok(line) = line {
-                let _ = stdout_sender.send(("stdout", line));
-            }
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = stdout_sender.send(("stdout", line));
         }
     });
     let stderr_sender = sender.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            if let Ok(line) = line {
-                let _ = stderr_sender.send(("stderr", line));
-            }
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = stderr_sender.send(("stderr", line));
         }
     });
     drop(sender);
@@ -8069,7 +8066,7 @@ mod tests {
             let error = claude_npm_shim_preflight_error(&shim);
 
             assert_eq!(
-                error.as_deref(),
+                error,
                 Some("Claude Code native binary is missing or invalid; reinstall @anthropic-ai/claude-code with npm optional dependencies enabled.")
             );
         }

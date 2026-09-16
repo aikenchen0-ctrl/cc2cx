@@ -93,6 +93,51 @@ fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     Some((db_path, session_id))
 }
 
+/// Parse CASR's OpenCode virtual path format:
+/// <absolute-opencode.db-path>/<url-encoded-session-id>.
+///
+/// The virtual leaf is not a real file. Its parent must be the actual
+/// opencode.db file so ordinary file-path dispatch cannot mistake it for
+/// the legacy JSON message directory.
+pub(crate) fn parse_virtual_path(source: &str) -> Option<(PathBuf, String)> {
+    let path = Path::new(source);
+    let database = path.parent()?;
+    if !database.is_file() || !is_valid_virtual_database(database) {
+        return None;
+    }
+
+    let encoded_session_id = path.file_name()?.to_str()?;
+    if encoded_session_id.is_empty() {
+        return None;
+    }
+    let session_id = urlencoding::decode(encoded_session_id).ok()?.into_owned();
+    if session_id.is_empty()
+        || session_id == "."
+        || session_id == ".."
+        || session_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    Some((database.to_path_buf(), session_id))
+}
+
+fn is_valid_virtual_database(database: &Path) -> bool {
+    let Some(database) = database.canonicalize().ok() else {
+        return false;
+    };
+    is_discovered_opencode_database(&database)
+}
+
+fn is_discovered_opencode_database(database: &Path) -> bool {
+    <casr::providers::opencode::OpenCode as casr::providers::Provider>::session_roots(
+        &casr::providers::opencode::OpenCode,
+    )
+    .into_iter()
+    .filter_map(|known| known.canonicalize().ok())
+    .any(|known| known == database)
+}
+
 fn scan_sessions_sqlite() -> Vec<SessionMeta> {
     let db_path = get_opencode_db_path();
     if !db_path.exists() {
@@ -230,8 +275,15 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
 
+    load_messages_sqlite_for_session(&db_path, &session_id)
+}
+
+fn load_messages_sqlite_for_session(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Vec<SessionMessage>, String> {
     let conn = Connection::open_with_flags(
-        &db_path,
+        db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| format!("Failed to open OpenCode database: {e}"))?;
@@ -243,7 +295,7 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
         .map_err(|e| format!("Failed to prepare message query: {e}"))?;
 
     let msg_rows = msg_stmt
-        .query_map([session_id.as_str()], |row| {
+        .query_map([session_id], |row| {
             let id: String = row.get(0)?;
             let ts: i64 = row.get(1)?;
             let data: String = row.get(2)?;
@@ -258,7 +310,7 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
         .map_err(|e| format!("Failed to prepare part query: {e}"))?;
 
     let part_rows = part_stmt
-        .query_map([session_id.as_str()], |row| {
+        .query_map([session_id], |row| {
             let message_id: String = row.get(0)?;
             let data: String = row.get(1)?;
             Ok((message_id, data))
@@ -382,42 +434,119 @@ pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<b
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
     let (db_path, ref_session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    delete_session_sqlite_for_path(session_id, &db_path, &ref_session_id, "SQLite", true)
+}
+
+/// Delete a session addressed by CASR's OpenCode virtual database path.
+pub(crate) fn delete_session_virtual_path(session_id: &str, source: &str) -> Result<bool, String> {
+    let (db_path, ref_session_id) = parse_virtual_path(source)
+        .ok_or_else(|| format!("Invalid OpenCode virtual source path: {source}"))?;
+    delete_session_sqlite_for_path(session_id, &db_path, &ref_session_id, "virtual", false)
+}
+
+fn delete_session_sqlite_for_path(
+    session_id: &str,
+    db_path: &Path,
+    ref_session_id: &str,
+    source_kind: &str,
+    require_default_database: bool,
+) -> Result<bool, String> {
     let db_path = db_path
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize SQLite database path: {e}"))?;
-    let expected_db_path = get_opencode_db_path()
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize expected OpenCode database path: {e}"))?;
-
     if ref_session_id != session_id {
         return Err(format!(
-            "OpenCode SQLite session ID mismatch: expected {session_id}, found {ref_session_id}"
+            "OpenCode {source_kind} session ID mismatch: expected {session_id}, found {ref_session_id}"
         ));
     }
-    if db_path != expected_db_path {
-        return Err("SQLite path does not match expected OpenCode database".to_string());
+    if require_default_database {
+        let expected_db_path = get_opencode_db_path()
+            .canonicalize()
+            .map_err(|e| format!("Failed to canonicalize expected OpenCode database path: {e}"))?;
+        if db_path != expected_db_path {
+            return Err("SQLite path does not match expected OpenCode database".to_string());
+        }
+    } else {
+        if !is_discovered_opencode_database(&db_path) {
+            return Err("OpenCode database is not a discovered session store".to_string());
+        }
     }
 
     let conn =
         Connection::open(&db_path).map_err(|e| format!("Failed to open OpenCode database: {e}"))?;
 
+    let schema = detect_sqlite_schema(&conn, &db_path)?;
+    if schema != SqliteSchema::Legacy {
+        return Err(format!(
+            "OpenCode {schema} database is read-only for session deletion; its native rows are a projection of an event log"
+        ));
+    }
+
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
-    tx.execute("DELETE FROM part WHERE session_id = ?1", [session_id])
-        .map_err(|e| format!("Failed to delete OpenCode parts: {e}"))?;
-    tx.execute("DELETE FROM message WHERE session_id = ?1", [session_id])
+    if table_exists(&tx, "files") {
+        tx.execute("DELETE FROM files WHERE session_id = ?1", [session_id])
+            .map_err(|e| format!("Failed to delete OpenCode files: {e}"))?;
+    }
+    tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])
         .map_err(|e| format!("Failed to delete OpenCode messages: {e}"))?;
 
     let deleted = tx
-        .execute("DELETE FROM session WHERE id = ?1", [session_id])
+        .execute("DELETE FROM sessions WHERE id = ?1", [session_id])
         .map_err(|e| format!("Failed to delete OpenCode session: {e}"))?;
 
     tx.commit()
         .map_err(|e| format!("Failed to commit session deletion: {e}"))?;
 
     Ok(deleted > 0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteSchema {
+    Legacy,
+    V1,
+    V2,
+}
+
+impl std::fmt::Display for SqliteSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Legacy => "legacy",
+            Self::V1 => "1.x",
+            Self::V2 => "2.x",
+        })
+    }
+}
+
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
+        .and_then(|mut statement| statement.exists([table]))
+        .unwrap_or(false)
+}
+
+/// Detect the OpenCode schema before mutating a database.
+///
+/// The order matches CASR's provider: 2.x first because migrated databases
+/// may retain stale 1.x tables, then legacy, then 1.x. Only the legacy layout
+/// is safe to delete directly; the other two are event-log projections.
+fn detect_sqlite_schema(conn: &Connection, db_path: &Path) -> Result<SqliteSchema, String> {
+    if table_exists(conn, "session_v2") && table_exists(conn, "session_message") {
+        return Ok(SqliteSchema::V2);
+    }
+    if table_exists(conn, "sessions") && table_exists(conn, "messages") {
+        return Ok(SqliteSchema::Legacy);
+    }
+    if table_exists(conn, "session") && table_exists(conn, "message") && table_exists(conn, "part")
+    {
+        return Ok(SqliteSchema::V1);
+    }
+
+    Err(format!(
+        "OpenCode database {} does not match a supported schema for deletion",
+        db_path.display()
+    ))
 }
 
 fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
@@ -626,6 +755,7 @@ fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
@@ -664,6 +794,108 @@ mod tests {
             ",
         )
         .expect("create sqlite schema");
+    }
+
+    fn create_legacy_sqlite_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0.0,
+                updated_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                summary_message_id TEXT
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                parts TEXT NOT NULL DEFAULT '[]',
+                model TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE TABLE files (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                version TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            ",
+        )
+        .expect("create legacy sqlite schema");
+    }
+
+    fn create_v2_sqlite_schema(conn: &Connection) {
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, name TEXT);
+            CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                workspace_id TEXT,
+                parent_id TEXT,
+                fork_session_id TEXT,
+                fork_boundary TEXT,
+                slug TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                path TEXT,
+                title TEXT,
+                version TEXT NOT NULL,
+                metadata TEXT,
+                cost REAL NOT NULL DEFAULT 0,
+                tokens_input INTEGER NOT NULL DEFAULT 0,
+                tokens_output INTEGER NOT NULL DEFAULT 0,
+                tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+                tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+                tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+                agent TEXT,
+                model TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            ",
+        )
+        .expect("create v2 sqlite schema");
+    }
+
+    fn set_opencode_db_override(path: &Path) -> Option<std::ffi::OsString> {
+        let original = std::env::var_os("OPENCODE_DB_PATH");
+        #[allow(deprecated)]
+        std::env::set_var("OPENCODE_DB_PATH", path);
+        original
+    }
+
+    fn restore_opencode_db_override(original: Option<std::ffi::OsString>) {
+        #[allow(deprecated)]
+        if let Some(value) = original {
+            std::env::set_var("OPENCODE_DB_PATH", value);
+        } else {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
     }
 
     #[test]
@@ -780,6 +1012,31 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    #[allow(deprecated)]
+    fn parse_virtual_path_accepts_custom_database_from_casr_override() {
+        let _guard = opencode_env_lock().lock().expect("lock");
+        let temp = tempdir().expect("tempdir");
+        let database = temp.path().join("custom.sqlite");
+        Connection::open(&database).expect("create database");
+        let original = std::env::var_os("OPENCODE_DB_PATH");
+        std::env::set_var("OPENCODE_DB_PATH", &database);
+
+        let source = database.join("custom%2Fsession");
+        let parsed = parse_virtual_path(&source.to_string_lossy()).expect("custom virtual path");
+
+        if let Some(value) = original {
+            std::env::set_var("OPENCODE_DB_PATH", value);
+        } else {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
+
+        assert_eq!(parsed.0, database);
+        assert_eq!(parsed.1, "custom/session");
+    }
+
+    #[test]
+    #[serial]
     #[allow(deprecated)] // set_var/remove_var deprecated since Rust 1.81; safe here under mutex
     fn scan_sessions_sqlite_reads_temp_database() {
         let _guard = opencode_env_lock().lock().expect("lock");
@@ -895,6 +1152,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_removes_session() {
         let _guard = opencode_env_lock().lock().expect("lock");
         let temp = tempdir().expect("tempdir");
@@ -906,23 +1164,18 @@ mod tests {
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
-        create_sqlite_schema(&conn);
+        create_legacy_sqlite_schema(&conn);
 
         conn.execute(
-            "INSERT INTO session (id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
-            ("ses_1", "Session", "/tmp/project-a", 1000_i64, 3000_i64),
+            "INSERT INTO sessions (id, title, updated_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+            ("ses_1", "Session", 3000_i64, 1000_i64),
         )
         .expect("insert session");
         conn.execute(
-            "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
-            ("msg_1", "ses_1", 1000_i64, r#"{"role":"user"}"#),
+            "INSERT INTO messages (id, session_id, role, parts, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            ("msg_1", "ses_1", "user", "[]", 1000_i64, 1000_i64),
         )
         .expect("insert message");
-        conn.execute(
-            "INSERT INTO part (id, session_id, message_id, time_created, data) VALUES (?1, ?2, ?3, ?4, ?5)",
-            ("prt_1", "ses_1", "msg_1", 1000_i64, r#"{"type":"text","text":"Hello"}"#),
-        )
-        .expect("insert part");
         drop(conn);
 
         let source = format!("sqlite:{}:ses_1", db_path.display());
@@ -932,29 +1185,21 @@ mod tests {
         let conn = Connection::open(&db_path).expect("re-open sqlite db");
         let remaining_sessions: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM session WHERE id = 'ses_1'",
+                "SELECT COUNT(*) FROM sessions WHERE id = 'ses_1'",
                 [],
                 |row| row.get(0),
             )
             .expect("count sessions");
         let remaining_messages: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM message WHERE session_id = 'ses_1'",
+                "SELECT COUNT(*) FROM messages WHERE session_id = 'ses_1'",
                 [],
                 |row| row.get(0),
             )
             .expect("count messages");
-        let remaining_parts: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM part WHERE session_id = 'ses_1'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count parts");
 
         assert_eq!(remaining_sessions, 0);
         assert_eq!(remaining_messages, 0);
-        assert_eq!(remaining_parts, 0);
 
         #[allow(deprecated)]
         if let Some(value) = original_xdg {
@@ -965,6 +1210,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_rejects_foreign_db_path() {
         let _guard = opencode_env_lock().lock().expect("lock");
         let temp = tempdir().expect("tempdir");
@@ -997,5 +1243,146 @@ mod tests {
         } else {
             std::env::remove_var("XDG_DATA_HOME");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn delete_virtual_legacy_session_removes_legacy_rows() {
+        let _guard = opencode_env_lock().lock().expect("lock");
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("custom.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite db");
+        create_legacy_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO sessions (id, title, updated_at, created_at) VALUES (?1, 'Legacy', 2, 1)",
+            ["legacy-id"],
+        )
+        .expect("insert legacy session");
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, parts, created_at, updated_at) VALUES ('msg', ?1, 'user', '[]', 1, 1)",
+            ["legacy-id"],
+        )
+        .expect("insert legacy message");
+        conn.execute(
+            "INSERT INTO files (id, session_id, path, content, version, created_at, updated_at) VALUES ('file', ?1, 'a.txt', 'x', '1', 1, 1)",
+            ["legacy-id"],
+        )
+        .expect("insert legacy file");
+        drop(conn);
+
+        let original = set_opencode_db_override(&db_path);
+        let source = db_path.join("legacy-id");
+        let deleted = delete_session_virtual_path("legacy-id", &source.to_string_lossy())
+            .expect("legacy virtual delete");
+        restore_opencode_db_override(original);
+
+        assert!(deleted);
+        let conn = Connection::open(&db_path).expect("reopen sqlite db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id = 'legacy-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count sessions"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = 'legacy-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count messages"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM files WHERE session_id = 'legacy-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count files"),
+            0
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn delete_virtual_v1_session_is_rejected_as_read_only() {
+        let _guard = opencode_env_lock().lock().expect("lock");
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("custom.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite db");
+        create_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO session (id, title, directory, time_created, time_updated) VALUES ('v1-id', 'V1', '/tmp', 1, 2)",
+            [],
+        )
+        .expect("insert v1 session");
+        drop(conn);
+
+        let original = set_opencode_db_override(&db_path);
+        let source = db_path.join("v1-id");
+        let error = delete_session_virtual_path("v1-id", &source.to_string_lossy())
+            .expect_err("v1 virtual delete must be rejected");
+        restore_opencode_db_override(original);
+
+        assert!(
+            error.contains("read-only") || error.contains("projection"),
+            "{error}"
+        );
+        let conn = Connection::open(&db_path).expect("reopen sqlite db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session WHERE id = 'v1-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count sessions"),
+            1
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn delete_virtual_v2_session_is_rejected_as_read_only() {
+        let _guard = opencode_env_lock().lock().expect("lock");
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("custom.sqlite");
+        let conn = Connection::open(&db_path).expect("open sqlite db");
+        create_v2_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO project (id, worktree, name) VALUES ('p', '/tmp', 'p')",
+            [],
+        )
+        .expect("insert project");
+        conn.execute(
+            "INSERT INTO session_v2 (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES ('v2-id', 'p', 'v2', '/tmp', 'V2', '2.0', 1, 2)",
+            [],
+        )
+        .expect("insert v2 session");
+        drop(conn);
+
+        let original = set_opencode_db_override(&db_path);
+        let source = db_path.join("v2-id");
+        let error = delete_session_virtual_path("v2-id", &source.to_string_lossy())
+            .expect_err("v2 virtual delete must be rejected");
+        restore_opencode_db_override(original);
+
+        assert!(
+            error.contains("read-only") || error.contains("projection"),
+            "{error}"
+        );
+        let conn = Connection::open(&db_path).expect("reopen sqlite db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session_v2 WHERE id = 'v2-id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count sessions"),
+            1
+        );
     }
 }

@@ -401,6 +401,30 @@ fn atomic_write_with_unix_mode(
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
+        if unix_mode.is_some() {
+            // ReplaceFileW carries the destination security descriptor to the replacement.
+            // Tighten an existing regular file first; otherwise the private temporary file
+            // would become broad again after publication.
+            match fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => {
+                    if let Err(error) = set_private_windows_acl(path) {
+                        let _ = fs::remove_file(&tmp);
+                        return Err(error);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(AppError::io(path, error));
+                }
+            }
+            if let Err(error) = set_private_windows_acl(&tmp) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error);
+            }
+        }
+
         let mut completed = false;
         let mut last_error = None;
 
@@ -471,6 +495,61 @@ fn atomic_write_with_unix_mode(
                 source,
             });
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_private_windows_acl(path: &Path) -> Result<(), AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        Security::{
+            SetFileSecurityW, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        },
+    };
+
+    // Restrict private files to the owner and SYSTEM. The protected DACL prevents inherited
+    // broad read permissions from the application-config directory.
+    let sddl: Vec<u16> = "D:P(A;;FA;;;SY)(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut _descriptor_size = 0u32;
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            &mut _descriptor_size,
+        )
+    };
+    if converted == 0 {
+        return Err(AppError::Config(format!(
+            "Windows 私有 ACL 转换失败: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let security_info: OBJECT_SECURITY_INFORMATION =
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    let result = unsafe { SetFileSecurityW(path_wide.as_ptr(), security_info, descriptor) };
+    unsafe {
+        let _ = LocalFree(descriptor);
+    }
+    if result == 0 {
+        return Err(AppError::Config(format!(
+            "Windows 私有 ACL 设置失败: {}",
+            std::io::Error::last_os_error()
+        )));
     }
     Ok(())
 }

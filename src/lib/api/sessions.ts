@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SessionMessage, SessionMeta } from "@/types";
+import type {
+  LaunchTransferredSessionRequest,
+  LaunchTransferredSessionResult,
+  SessionMessage,
+  SessionMeta,
+  SessionTransferRequest,
+  SessionTransferResult,
+  SessionTransferTarget,
+} from "@/types";
 
 export interface DeleteSessionOptions {
   providerId: string;
@@ -50,5 +58,21 @@ export const sessionsApi = {
       cwd,
       customConfig,
     });
+  },
+
+  async listTransferTargets(): Promise<SessionTransferTarget[]> {
+    return await invoke("list_session_transfer_targets");
+  },
+
+  async transfer(
+    request: SessionTransferRequest,
+  ): Promise<SessionTransferResult> {
+    return await invoke("transfer_session", { request });
+  },
+
+  async launchTransferred(
+    request: LaunchTransferredSessionRequest,
+  ): Promise<LaunchTransferredSessionResult> {
+    return await invoke("launch_transferred_session", { request });
   },
 };

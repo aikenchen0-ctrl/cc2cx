@@ -451,6 +451,20 @@ pub struct ProviderMeta {
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub claude_desktop_model_routes: HashMap<String, ClaudeDesktopModelRoute>,
+    /// Cursor requested model aliases mapped to the configured upstream model ID.
+    ///
+    /// This is intentionally separate from Claude Desktop's role routes: Cursor model IDs are
+    /// supplied by the client protocol and must not inherit a UI-specific role mapping by
+    /// accident.
+    #[serde(
+        default,
+        rename = "cursorModelRoutes",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub cursor_model_routes: HashMap<String, String>,
+    /// Explicit fallback model for Cursor requests whose model ID is not known locally.
+    #[serde(rename = "cursorDefaultModel", skip_serializing_if = "Option::is_none")]
+    pub cursor_default_model: Option<String>,
     /// 用量查询脚本配置
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_script: Option<UsageScript>,

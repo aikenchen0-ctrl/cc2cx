@@ -367,6 +367,59 @@
         "running": "執行中",
         "stopped": "已停止"
       },
+      "cursor": {
+        "title": "Cursor 本機接入",
+        "description": "管理 Cursor 的使用者層級代理、CA 信任與可復原的啟停流程",
+        "integrationState": "接入狀態",
+        "caState": "CA 狀態",
+        "proxyAddress": "代理位址",
+        "proxyUnavailable": "本機代理未執行",
+        "transparentActive": "透明入口執行中：{{addresses}}",
+        "transparentInactive": "透明入口未執行",
+        "hostsManaged": "已寫入可回復的 CC2CX Hosts 標記區塊",
+        "hostsUnmanaged": "未託管系統 Hosts",
+        "backupPresent": "偵測到 settings 復原備份，停止或復原後會清理",
+        "backupAbsent": "沒有待復原的 settings 備份",
+        "backendHealth": "Backend 健康狀態",
+        "backendError": "最近錯誤代碼：{{code}}",
+        "backendHealthStates": {
+          "not_required": "不需要上游",
+          "not_observed": "尚未請求",
+          "healthy": "正常",
+          "auth_failed": "驗證失敗",
+          "timeout": "逾時",
+          "transport_failed": "傳輸失敗",
+          "protocol_failed": "通訊協定失敗",
+          "failed": "失敗"
+        },
+        "untrustedHint": "目前 CA 尚未受系統信任。啟動不會自動安裝；請點擊「安裝 CA」，依系統提示確認後再使用 Cursor。",
+        "hostsElevationHint": "啟動會把 api2/api3.cursor.sh 寫入系統 Hosts，並在每個 fake-IP 的 443 連接埠監聽。沒有寫入權限時會直接失敗，不會改其他 Hosts 檔。",
+        "installCommand": "明確安裝指令",
+        "refresh": "重新整理 Cursor 接入狀態",
+        "start": "啟動接入",
+        "stop": "停止接入",
+        "initializeCa": "初始化 CA",
+        "installCa": "安裝 CA",
+        "uninstallCa": "解除安裝 CA",
+        "initializeSuccess": "Cursor CA 已初始化",
+        "installSuccess": "Cursor CA 已安裝",
+        "uninstallSuccess": "Cursor CA 已解除安裝",
+        "startSuccess": "Cursor 接入已啟動",
+        "stopSuccess": "Cursor 接入已停止",
+        "states": {
+          "disabled": "未啟動",
+          "starting": "啟動中",
+          "running": "執行中",
+          "degraded": "降級",
+          "stopping": "停止中"
+        },
+        "caStates": {
+          "missing": "未初始化",
+          "invalid": "無效",
+          "untrusted": "未信任",
+          "ready": "已信任"
+        }
+      },
       "connectivityCheck": {
         "title": "連通檢測設定",
         "description": "設定供應商位址探測的逾時、重試與緩慢閾值"

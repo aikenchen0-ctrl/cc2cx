@@ -181,6 +181,10 @@ export interface ProviderMeta {
   claudeDesktopMode?: "direct" | "proxy";
   // Claude Desktop 本地路由模式：Claude-safe route -> upstream model
   claudeDesktopModelRoutes?: Record<string, ClaudeDesktopModelRoute>;
+  // Cursor requested model aliases -> configured upstream model
+  cursorModelRoutes?: Record<string, string>;
+  // Explicit Cursor fallback when the requested model is not declared locally
+  cursorDefaultModel?: string;
   // 用量查询脚本配置
   usage_script?: UsageScript;
   // 请求地址管理：测速后自动选择最佳端点
@@ -483,6 +487,67 @@ export interface SessionMessage {
   role: string;
   content: string;
   ts?: number;
+}
+
+export interface SessionTransferWriteSupport {
+  kind: "supported" | "readOnly" | "conditional";
+  reason?: string;
+}
+
+export interface SessionTransferLaunchSupport {
+  kind: "supported" | "executableMissing" | "unsupported";
+  reason?: string;
+}
+
+export interface SessionTransferTarget {
+  providerId: string;
+  alias: string;
+  name: string;
+  installed: boolean;
+  version?: string;
+  writeSupport: SessionTransferWriteSupport;
+  launchSupport: SessionTransferLaunchSupport;
+}
+
+export interface SessionTransferRequest {
+  sourceProviderId: string;
+  sourceSessionId: string;
+  sourcePath: string;
+  targetProvider: string;
+  workspace?: string | null;
+  force?: boolean;
+  enrich?: boolean;
+  maxContextTokens?: number;
+  maxToolOutput?: number;
+  keepReasoning?: boolean;
+}
+
+export interface SessionTransferResult {
+  sourceProviderId: string;
+  sourceSessionId: string;
+  sourcePath: string;
+  targetProviderId: string;
+  targetSessionId: string;
+  workspace?: string | null;
+  writtenPaths: string[];
+  backupPath?: string | null;
+  resumeCommand?: string;
+  warnings: string[];
+  lossy: boolean;
+}
+
+export interface LaunchTransferredSessionRequest {
+  targetProvider: string;
+  sessionId: string;
+  workspace?: string | null;
+}
+
+export interface LaunchTransferredSessionResult {
+  launched: boolean;
+  providerId: string;
+  sessionId: string;
+  workspace?: string | null;
+  warning?: string | null;
 }
 
 // MCP 服务器连接参数（宽松：允许扩展字段）

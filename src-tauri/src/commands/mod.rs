@@ -6,6 +6,7 @@ mod codex_oauth;
 mod coding_plan;
 mod config;
 mod copilot;
+mod cursor;
 mod deeplink;
 mod env;
 mod failover;
@@ -43,6 +44,7 @@ pub use codex_oauth::*;
 pub use coding_plan::*;
 pub use config::*;
 pub use copilot::*;
+pub use cursor::*;
 pub use deeplink::*;
 pub use env::*;
 pub use failover::*;
@@ -61,6 +63,10 @@ pub use prompt::*;
 pub use provider::*;
 pub use proxy::*;
 pub use session_manager::*;
+pub use session_manager::{
+    __cmd__launch_transferred_session, __cmd__list_session_transfer_targets,
+    __cmd__transfer_session,
+};
 pub use settings::*;
 pub use skill::*;
 pub use stream_check::*;

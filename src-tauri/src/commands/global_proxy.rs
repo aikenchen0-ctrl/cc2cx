@@ -408,7 +408,7 @@ fn read_codex_proxy_env_status() -> Result<CodexProxyEnvStatus, String> {
 }
 
 fn read_codex_proxy_env_status_at(path: &Path) -> Result<CodexProxyEnvStatus, String> {
-    let content = read_codex_env(&path)?;
+    let content = read_codex_env(path)?;
     remove_codex_proxy_env(&content)?;
     let enabled = content.contains(CODEX_PROXY_BEGIN) && content.contains(CODEX_PROXY_END);
     let raw_proxy_url = enabled.then(|| codex_managed_proxy_url(&content)).flatten();
@@ -421,7 +421,7 @@ fn read_codex_proxy_env_status_at(path: &Path) -> Result<CodexProxyEnvStatus, St
         enabled,
         path: path.to_string_lossy().into_owned(),
         proxy_url,
-        backup_path: enabled.then(|| codex_env_backup_path(&path).to_string_lossy().into_owned()),
+        backup_path: enabled.then(|| codex_env_backup_path(path).to_string_lossy().into_owned()),
         port_reachable,
         env_txt_detected: path.with_file_name(".env.txt").is_file(),
     })
@@ -436,7 +436,7 @@ fn write_codex_proxy_env_at(
     path: &Path,
     proxy_url: Option<&str>,
 ) -> Result<CodexProxyEnvStatus, String> {
-    let existing = read_codex_env(&path)?;
+    let existing = read_codex_env(path)?;
     let updated = match proxy_url.filter(|url| !url.trim().is_empty()) {
         Some(proxy_url) => upsert_codex_proxy_env(&existing, proxy_url)?,
         None => remove_codex_proxy_env(&existing)?,
@@ -445,11 +445,11 @@ fn write_codex_proxy_env_at(
         return read_codex_proxy_env_status_at(path);
     }
     if path.exists() {
-        let backup = codex_env_backup_path(&path);
+        let backup = codex_env_backup_path(path);
         crate::config::atomic_write_private(&backup, existing.as_bytes())
             .map_err(|error| format!("备份 Codex .env 失败: {error}"))?;
     }
-    crate::config::atomic_write_private(&path, updated.as_bytes())
+    crate::config::atomic_write_private(path, updated.as_bytes())
         .map_err(|error| format!("写入 Codex .env 失败: {error}"))?;
     read_codex_proxy_env_status_at(path)
 }

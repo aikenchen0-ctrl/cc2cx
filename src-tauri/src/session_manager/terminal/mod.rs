@@ -10,6 +10,8 @@ pub fn launch_terminal(
         return Err("Resume command is empty".to_string());
     }
 
+    validate_resume_command(command)?;
+
     if !cfg!(target_os = "macos") {
         return Err("Terminal resume is only supported on macOS".to_string());
     }
@@ -27,6 +29,26 @@ pub fn launch_terminal(
         "custom" => launch_custom(command, cwd, custom_config),
         _ => Err(format!("Unsupported terminal target: {target}")),
     }
+}
+
+/// Reject commands that could change shell parsing when passed through the
+/// legacy macOS terminal launchers. Provider-generated commands are simple
+/// argv-like invocations; shell operators and substitutions are never needed
+/// for a valid session resume command.
+pub(crate) fn validate_resume_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Err("Resume command is empty".to_string());
+    }
+    if command.chars().any(char::is_control) {
+        return Err("Resume command contains control characters".to_string());
+    }
+    if command
+        .chars()
+        .any(|character| matches!(character, '$' | '`' | ';' | '&' | '|' | '<' | '>'))
+    {
+        return Err("Resume command contains shell control syntax".to_string());
+    }
+    Ok(())
 }
 
 fn launch_macos_terminal(command: &str, cwd: Option<&str>) -> Result<(), String> {
@@ -344,6 +366,36 @@ fn escape_osascript(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_command_rejects_shell_control_syntax() {
+        for command in [
+            "codex resume abc; id",
+            "codex resume $(id)",
+            "codex resume `id`",
+            "codex resume abc && touch /tmp/pwned",
+            "codex resume abc\n touch /tmp/pwned",
+        ] {
+            assert!(
+                validate_resume_command(command).is_err(),
+                "unsafe resume command must be rejected: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_command_accepts_provider_generated_safe_commands() {
+        for command in [
+            "codex resume abc-123",
+            "claude --resume 019fcac9-2222-7333-8444-555566667777",
+            "pi --session '/tmp/project/session.jsonl'",
+        ] {
+            assert!(
+                validate_resume_command(command).is_ok(),
+                "safe command: {command:?}"
+            );
+        }
+    }
 
     #[test]
     fn build_shell_command_keeps_command_without_cwd_prefix_when_not_provided() {
