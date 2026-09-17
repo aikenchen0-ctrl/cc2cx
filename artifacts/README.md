@@ -1,12 +1,12 @@
-# cc-launch 3.20.5 Windows artifacts
+# cc-launch 3.20.6 Windows artifacts
 
 These are the release-mode Windows installers built from commit
-`1d508e983fc136a2ee3c3d0334a98d42a1f35459`.
+`405f844a50182f0603b2fcb8fb7d161309aba350`.
 
 | Artifact | Format | Size | SHA-256 |
 | --- | --- | ---: | --- |
-| `cc-launch_3.20.5_x64-setup.exe` | NSIS per-user installer | 11,866,272 bytes | `4D64E3A1619F6051C66368018A8C68F6AFB58EE7D97559553582140A0D539622` |
-| `cc-launch_3.20.5_x64_en-US.msi` | Windows Installer | 15,904,768 bytes | `6F166DB0F49357ACF3386A29849EA8A38D4BBA1973A6B8B9413AACD6758AB7BF` |
+| `cc-launch_3.20.6_x64-setup.exe` | NSIS per-user installer | 11,859,464 bytes | `CC834583A732FBF3D7ABCB2DAD5A9DB6D6C834650D14514932AAD025A08EC038` |
+| `cc-launch_3.20.6_x64_en-US.msi` | Windows Installer | 17,534,976 bytes | `8281FFCB161E29BFB2C7109A9CE5B35D799E6A9965D6C37CB3040AF227AE9EA7` |
 
 The installers are currently unsigned. Verify the SHA-256 value before
 installing. Do not distribute `src-tauri/target/debug/cc-launch.exe`; that is
