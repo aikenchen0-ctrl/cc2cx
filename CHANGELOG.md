@@ -5,6 +5,12 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.7] - 2026-09-17
+
+### Fixed
+
+- **CC Switch schema 18 兼容**：一键迁移旧 CC Switch 数据库现在支持 `user_version=18`，幂等补齐 `session_log_sync` 的字节游标与尾部指纹列；已有供应商、MCP、Skills、会话用量和备份数据保持不变。
+
 ## [3.20.5] - 2026-09-04
 
 ### Fixed

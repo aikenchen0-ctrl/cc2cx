@@ -34,6 +34,14 @@
 ## 真实旧数据库预检（2026-09-13）
 
 - 旧库 `~/.cc-switch/cc-switch.db` 只读完整性检查返回 `ok`。
-- 旧库 `user_version=16`，当前导入器支持的 schema 版本为 17，属于可迁移范围。
+- 旧库 `user_version=16`，当前导入器支持的 schema 版本为 18，属于可迁移范围。
 - 已确认 `providers`、`provider_endpoints`、`mcp_servers`、`prompts`、`skills`、`skill_repos`、`settings` 均存在。
 - 已在本机执行一次真实自动迁移：旧库保持不变，当前库完整性检查为 `ok`、版本 17，并生成新的安全备份；后续重复迁移仍应由用户主动点击“一键同步旧配置”触发。
+
+## Schema 18 兼容更新（2026-09-17）
+
+- CC Switch v3.20.1+ 将 `user_version` 提升到 18；v17 → v18 只为
+  `session_log_sync` 增加可空的 `last_byte_offset` 与
+  `last_tail_fingerprint` 列。
+- cc2cx 现在会幂等补齐这两列并将数据库版本迁移到 18；已有行保持 `NULL`，不删除配置或会话数据。
+- 本次只移植 schema 18 的兼容迁移；上游 schema 19 的 `enabled_mcode` 变更需单独评估，不纳入本修复。

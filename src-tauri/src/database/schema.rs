@@ -302,7 +302,9 @@ impl Database {
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
             [],
         )
@@ -535,6 +537,11 @@ impl Database {
                         log::info!("迁移数据库从 v16 到 v17（添加会话用量持久去重账本）");
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（添加会话日志字节游标列）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1237,7 +1244,9 @@ impl Database {
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
             [],
         )
@@ -1562,6 +1571,21 @@ impl Database {
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
         .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))?;
+        Ok(())
+    }
+
+    /// v17 -> v18: add nullable byte-cursor fields for incremental session-log scans.
+    /// Existing rows remain NULL and continue through the legacy line-offset path.
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
+        }
         Ok(())
     }
 
@@ -3407,6 +3431,51 @@ mod tests {
              VALUES ('pi_session', 'request', 'semantic', 1)",
             [],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_adds_session_log_byte_cursor_columns() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+             );
+             INSERT INTO session_log_sync
+                (file_path, last_modified, last_line_offset, last_synced_at)
+             VALUES ('/tmp/session.jsonl', 5, 3, 1);",
+        )?;
+        Database::set_user_version(&conn, 17)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, 18);
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_byte_offset"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_tail_fingerprint"
+        )?);
+        let row: (i64, i64, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_modified, last_line_offset, last_byte_offset,
+                    last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/session.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(row, (5, 3, None, None));
+
+        Database::set_user_version(&conn, 17)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        assert_eq!(Database::get_user_version(&conn)?, 18);
+
         Ok(())
     }
 }

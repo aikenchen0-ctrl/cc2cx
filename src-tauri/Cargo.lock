@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "cc-launch"
-version = "3.20.6"
+version = "3.20.7"
 dependencies = [
  "anyhow",
  "arboard",
