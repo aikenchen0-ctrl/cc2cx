@@ -69,6 +69,24 @@ jobs:
           find "$bundle_dir" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) -print0 \
             | xargs -0 shasum -a 256 > "checksums-${{ matrix.arch }}.txt"
 
+      - name: Create ZIP app archive
+        shell: bash
+        run: |
+          bundle_dir="src-tauri/target/${{ matrix.target }}/release/bundle"
+          app_path="$bundle_dir/macos/cc-launch.app"
+          version="$(node -p "require('./package.json').version")"
+          if [[ "${{ matrix.target }}" == aarch64-* ]]; then
+            package_arch="aarch64"
+          else
+            package_arch="x64"
+          fi
+          zip_path="$GITHUB_WORKSPACE/cc-launch_${version}_${package_arch}.zip"
+          test -d "$app_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
+          test -s "$zip_path"
+          (cd "$GITHUB_WORKSPACE" && shasum -a 256 "$(basename "$zip_path")") \
+            >> "checksums-${{ matrix.arch }}.txt"
+
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v6
         with:
@@ -77,6 +95,7 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle
             checksums-${{ matrix.arch }}.txt
+            cc-launch_*.zip
 
   publish:
     name: Publish macOS release assets
@@ -101,7 +120,7 @@ jobs:
         run: |
           mkdir -p release-assets/publish
           find release-assets -type f \( \
-            -name '*.dmg' -o \
+            -name '*.dmg' -o -name '*.zip' -o \
             -name 'checksums-*.txt' \
           \) -exec cp -f {} release-assets/publish/ \;
           cp -f artifacts/cc-launch_*.exe artifacts/cc-launch_*.msi release-assets/publish/
@@ -119,6 +138,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-assets/publish/*.dmg
+            release-assets/publish/*.zip
             release-assets/publish/*.exe
             release-assets/publish/*.msi
             release-assets/publish/checksums-*.txt

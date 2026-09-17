@@ -88,13 +88,15 @@
 
 正式安装包会发布在 [GitHub Releases](https://github.com/aikenchen0-ctrl/cc2cx/releases)。请根据系统和架构选择对应产物：
 
-| 系统    | 推荐产物                      | 安装方式                            |
-| ------- | ----------------------------- | ----------------------------------- |
-| Windows | `.msi` 或 `.exe`              | 双击运行安装器                      |
-| macOS   | `.dmg`                        | 打开镜像，将应用拖入“应用程序”      |
-| Linux   | `.AppImage`、`.deb` 或 `.rpm` | 按发行版方式安装或直接运行 AppImage |
+| 系统    | 推荐产物                      | 安装方式                               |
+| ------- | ----------------------------- | -------------------------------------- |
+| Windows | `.msi` 或 `.exe`              | 双击运行安装器                         |
+| macOS   | `.dmg` 或 `.zip`              | DMG 拖入“应用程序”；ZIP 双击解压后运行 |
+| Linux   | `.AppImage`、`.deb` 或 `.rpm` | 按发行版方式安装或直接运行 AppImage    |
 
 正式发布包应经过平台签名。未签名构建适合本地测试和内部使用，Windows 可能显示 SmartScreen 提示，macOS 可能需要在“系统设置 → 隐私与安全性”中允许打开。
+
+macOS 架构选择：Apple Silicon（M1/M2/M3/M4）下载 `aarch64`，Intel Mac 下载 `x64`。ZIP 只改变解压方式，不替代签名和公证。
 
 ## 数据目录
 
