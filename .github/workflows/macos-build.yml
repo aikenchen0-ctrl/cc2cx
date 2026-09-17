@@ -7,7 +7,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -77,3 +77,41 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle
             checksums-${{ matrix.arch }}.txt
+
+  publish:
+    name: Publish macOS release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download architecture bundles
+        uses: actions/download-artifact@v6
+        with:
+          pattern: cc2cx-macos-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          mkdir -p release-assets/publish
+          find release-assets -type f \( \
+            -name '*.dmg' -o \
+            -name '*.app.tar.gz' -o \
+            -name 'checksums-*.txt' \
+          \) -exec cp -f {} release-assets/publish/ \;
+          test -n "$(find release-assets/publish -type f -print -quit)"
+          find release-assets/publish -maxdepth 1 -type f -print | sort
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: cc2cx ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/publish/*.dmg
+            release-assets/publish/*.app.tar.gz
+            release-assets/publish/checksums-*.txt
