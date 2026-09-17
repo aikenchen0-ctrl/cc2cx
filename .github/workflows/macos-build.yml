@@ -7,7 +7,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -83,7 +83,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v5
+
       - name: Download architecture bundles
         uses: actions/download-artifact@v6
         with:
@@ -97,9 +102,10 @@ jobs:
           mkdir -p release-assets/publish
           find release-assets -type f \( \
             -name '*.dmg' -o \
-            -name '*.app.tar.gz' -o \
             -name 'checksums-*.txt' \
           \) -exec cp -f {} release-assets/publish/ \;
+          cp -f artifacts/cc-launch_*.exe artifacts/cc-launch_*.msi release-assets/publish/
+          cp -f artifacts/SHA256SUMS.txt release-assets/publish/checksums-windows.txt
           test -n "$(find release-assets/publish -type f -print -quit)"
           find release-assets/publish -maxdepth 1 -type f -print | sort
 
@@ -113,5 +119,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-assets/publish/*.dmg
-            release-assets/publish/*.app.tar.gz
+            release-assets/publish/*.exe
+            release-assets/publish/*.msi
             release-assets/publish/checksums-*.txt
